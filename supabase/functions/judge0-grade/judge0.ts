@@ -12,25 +12,15 @@
  */
 
 /**
- * QuizEazz canonical internal language id -> Judge0 language_id.
+ * QuizEazz V1 supports exactly one programming language: C++.
  *
- * These QuizEazz identifiers are what `answers.language` already stores and
- * what the student-facing selector already sends. They are NOT changed by the
- * Judge0 integration.
- *
- * `java` maps to 90 (`Java (OpenJDK 17)`). Judge0's own id 62 is
- * `Java (OpenJDK 13.0.1)`; it is deliberately NOT used by QuizEazz and is
- * left active and untouched on the Judge0 server.
+ * Every programming submission is executed as C++ (GCC 9.2.0), Judge0
+ * language_id 54. The stored `answers.language` value is informational only
+ * and is never trusted for compiler selection: a malicious or stale browser
+ * value cannot divert execution to another language. Python, Java and C
+ * mappings were removed permanently.
  */
-export const JUDGE0_LANGUAGE_IDS: Readonly<Record<string, number>> = {
-  python: 71, // Python (3.8.1)
-  cpp: 54, //    C++ (GCC 9.2.0)
-  java: 90, //    Java (OpenJDK 17)
-  c: 50, //      C (GCC 9.2.0)
-}
-
-/** Java must resolve to the Java 17 language, never to 13. */
-export const QUIZEAZZ_JAVA_JUDGE0_LANGUAGE_ID = 90
+export const QUIZEAZZ_CPP_JUDGE0_LANGUAGE_ID = 54
 
 /**
  * Execution limits for every programming submission.
@@ -153,14 +143,19 @@ export function mapJudge0Result(
 }
 
 /**
- * Resolves a stored QuizEazz language id to a Judge0 language_id.
- * Returns null when the language is not supported, so the caller reports an
- * honest System Error instead of guessing a compiler.
+ * Resolves the Judge0 language_id for a programming submission.
+ *
+ * Always returns C++ (54). The caller-supplied identifier is accepted only
+ * as `'cpp'` or empty (legacy rows predate strict validation); anything else
+ * yields null so the caller reports an honest System Error instead of
+ * executing code under the wrong compiler. The language_id itself never
+ * comes from the browser.
  */
 export function resolveLanguageId(identifier: string | null | undefined): number | null {
-  if (!identifier) return null
-  const id = JUDGE0_LANGUAGE_IDS[identifier]
-  return typeof id === 'number' ? id : null
+  if (identifier === null || identifier === undefined || identifier === '' || identifier === 'cpp') {
+    return QUIZEAZZ_CPP_JUDGE0_LANGUAGE_ID
+  }
+  return null
 }
 
 export interface BuildSubmissionInput {

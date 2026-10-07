@@ -74,7 +74,7 @@ def map_judge0(status_id, exit_code=None, memory=None, memory_limit=512000):
 
 
 # ---------------------------------------------------------------------------
-# 1. Language mapping
+# 1. Language mapping — C++ only (QuizEazz V1)
 # ---------------------------------------------------------------------------
 def test_language_mapping():
     check("judge0.ts exists", J0_TS.exists())
@@ -82,27 +82,146 @@ def test_language_mapping():
         return
     t = J0_TS.read_text(encoding="utf-8")
 
-    expected = {"python": 71, "cpp": 54, "java": 90, "c": 50}
-    for lang, want in expected.items():
-        m = re.search(rf"^\s*{lang}:\s*(\d+),", t, re.M)
-        got = int(m.group(1)) if m else None
-        check(f"QuizEazz {lang} -> Judge0 language_id {want}", got == want,
-              f"found {got}")
+    check(
+        "C++ resolves to Judge0 language_id 54",
+        re.search(r"QUIZEAZZ_CPP_JUDGE0_LANGUAGE_ID\s*=\s*54\b", t) is not None,
+    )
+    for dead in ("python: 71", "java: 90", "java: 62", "c: 50",
+                 "QUIZEAZZ_JAVA_JUDGE0_LANGUAGE_ID", "JUDGE0_LANGUAGE_IDS"):
+        check(f"no dead multi-language mapping remains ({dead})",
+              dead not in t, f"found {dead!r} in judge0.ts")
 
+    lang_src = (SRC / "lib" / "languages.ts").read_text(encoding="utf-8")
     check(
-        "java maps to 90 and NEVER to 62",
-        re.search(r"^\s*java:\s*90,", t, re.M) is not None
-        and not re.search(r"^\s*java:\s*62,", t, re.M),
+        "languages.ts defines only the cpp identifier",
+        "cpp: 'C++'" in lang_src
+        and "'python'" not in lang_src and '"python"' not in lang_src
+        and "'java'" not in lang_src and '"java"' not in lang_src,
+        "python/java entries must not remain",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1b. C++-only enforcement (frontend + backend + migration 9)
+# ---------------------------------------------------------------------------
+def test_cpp_only_enforcement():
+    mig9 = SQL / "migration_09_cpp_only_and_verdict_fix.sql"
+    check("migration 9 exists", mig9.exists())
+    m9 = mig9.read_text(encoding="utf-8") if mig9.exists() else ""
+
+    # 1. Programming question language is cpp (frontend authoring has no selector).
+    create_modal = (SRC / "components" / "teacher" / "CreateQuestionModal.tsx").read_text(encoding="utf-8")
+    check(
+        "teacher authoring UI has no language dropdown",
+        not re.search(r'<option value="(any|java|python|c|cpp)"', create_modal),
+        "the remaining <select> is the question-category picker, not a language",
     )
     check(
-        "explicit Java 17 constant is 90",
-        re.search(r"QUIZEAZZ_JAVA_JUDGE0_LANGUAGE_ID\s*=\s*90\b", t) is not None,
+        "teacher authoring always stores cpp",
+        re.search(r"const language = 'cpp'", create_modal) is not None,
+    )
+
+    # 2. Unsupported programming languages are rejected for new questions.
+    check(
+        "teacher_create_question rejects non-cpp coding language",
+        "p_language IS DISTINCT FROM 'cpp'" in m9
+        and "Programming questions must use language ''cpp''" in m9,
+    )
+
+    # 3. Unsupported programming questions cannot be added to an exam.
+    check(
+        "teacher_set_exam_paper rejects non-cpp coding questions",
+        "q.language IS DISTINCT FROM 'cpp'" in m9
+        and "Only C++ (language ''cpp'')" in m9,
+    )
+
+    # 4. A student cannot submit a non-cpp answer through the backend:
+    # save_exam_answer ignores p_language for coding and stores 'cpp'.
+    check(
+        "save_exam_answer forces language cpp for coding answers",
+        m9.count("language = 'cpp'") >= 1 or "'cpp'," in m9,
+    )
+    student_screen = (SRC / "components" / "student" / "ExamTakingScreen.tsx").read_text(encoding="utf-8")
+    check(
+        "student exam screen has no language selector",
+        "<select" not in student_screen,
     )
     check(
-        "QuizEazz canonical ids are unchanged in src/lib/languages.ts",
-        all(f"{k}: '{v}'" in (SRC / "lib" / "languages.ts").read_text(encoding="utf-8")
-            for k, v in
-            [("python", "Python"), ("cpp", "C++"), ("java", "Java"), ("c", "C")]),
+        "student exam screen persists cpp",
+        "CODE_LANGUAGE" in student_screen or "language: 'cpp'" in student_screen,
+    )
+
+    # 5. Judge0 submission always uses language ID 54.
+    t = J0_TS.read_text(encoding="utf-8") if J0_TS.exists() else ""
+    check(
+        "submission path can only produce language_id 54",
+        "QUIZEAZZ_CPP_JUDGE0_LANGUAGE_ID" in t
+        # the body carries `language_id: languageId`, where languageId comes
+        # only from resolveLanguageId(), which returns 54-or-null; no numeric
+        # language-id literal may appear anywhere in the grading path.
+        and re.search(r"language_id:\s*languageId,", t) is not None
+        and not re.search(r"language_id:\s*\d+", t),
+    )
+
+    # 6. No frontend language selector exists anywhere in student/teacher UI.
+    selector_hits = []
+    for p in list((SRC / "components").rglob("*.tsx")):
+        txt = p.read_text(encoding="utf-8", errors="replace")
+        if re.search(r'option value="(python|java|c|any)"', txt):
+            selector_hits.append(str(p.relative_to(ROOT)))
+    check("no Python/Java/C/Any option remains in any UI dropdown", not selector_hits,
+          str(selector_hits))
+
+    # 7. Review displays C++ (dynamic label resolves cpp -> C++).
+    review = (SRC / "components" / "student" / "StudentResultReviewPage.tsx").read_text(encoding="utf-8")
+    check(
+        "review page renders the stored language via languageLabel",
+        "languageLabel(ev.language)" in review,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1c. D1 verdict application (RECORD vs TEXT defect)
+# ---------------------------------------------------------------------------
+def test_verdict_application():
+    mig9 = SQL / "migration_09_cpp_only_and_verdict_fix.sql"
+    m9 = mig9.read_text(encoding="utf-8") if mig9.exists() else ""
+    m7 = MIG7.read_text(encoding="utf-8") if MIG7.exists() else ""
+
+    # The defect: v_row RECORD compared to TEXT (42883) in migration 7.
+    check(
+        "migration 7 contains the RECORD defect (documents what is fixed)",
+        re.search(r"v_row RECORD;", m7) is not None
+        and re.search(r"IF v_row <>\s*'Pending Evaluation'", m7) is not None,
+    )
+    # The fix: scalar TEXT variable in migration 9.
+    check(
+        "migration 9 holds status in a scalar TEXT variable",
+        re.search(r"v_current_status TEXT;", m9) is not None,
+    )
+    check(
+        "migration 9 compares TEXT to TEXT",
+        re.search(r"IF v_current_status <>\s*'Pending Evaluation'", m9) is not None,
+    )
+    check(
+        "migration 9 contains no RECORD status variable in the verdict writer",
+        # NOTE: other copied functions legitimately use RECORD for row fetches
+        # (v_attempt, v_new_q); only the verdict-status variable v_row was the
+        # defect, and it must be gone entirely.
+        "v_row" not in m9,
+    )
+    for outcome in ("Correct", "Wrong Answer", "Runtime Error"):
+        check(
+            f"migration 9 allow-list still accepts '{outcome}'",
+            f"'{outcome}'" in m9,
+        )
+    check(
+        "migration 9 preserves the single-verdict guard",
+        "already has a verdict" in m9,
+    )
+    check(
+        "migration 9 preserves the authoritative-context flag",
+        "quizeazz.authoritative_context" in m9,
     )
 
 
@@ -344,6 +463,28 @@ def test_edge_function_auth_identity():
         "the ownership check runs on the caller's own JWT client, not service role",
         re.search(r"caller\.rpc\(\s*'quizeazz_attempt_belongs_to_caller'", idx) is not None,
         "auth.uid() only resolves on the caller client",
+    )
+
+    # The caller client's `supabaseKey` argument must be the anon key, NEVER
+    # the student's JWT: supabase-js sends it verbatim as the `apikey`
+    # header, and the gateway rejects a user JWT there with 401 (surfacing as
+    # {"error":"unauthenticated"}). The student identity travels only in
+    # Authorization.
+    check(
+        "the caller client uses the anon key, not the bearer, as its key",
+        re.search(r"Deno\.env\.get\('SUPABASE_ANON_KEY'\)\s*as\s*string,", idx) is not None,
+        "passing `bearer` as the key poisons the apikey header -> gateway 401",
+    )
+    check(
+        "the student JWT travels in the Authorization header",
+        re.search(r"Authorization:\s*`Bearer\s*\$\{bearer\}`", idx) is not None,
+        "expected global.headers.Authorization Bearer ${bearer}",
+    )
+    check(
+        "the service-role key never enters the caller client",
+        "serviceRoleKey" not in idx.split("const caller = createClient(")[1].split(")")[0]
+        if "const caller = createClient(" in idx else False,
+        "SUPABASE_SERVICE_ROLE_KEY must only feed the admin client",
     )
 
     # Identity validation must happen BEFORE the service-role client grades the
@@ -678,6 +819,8 @@ def test_no_ambiguous_catalog_columns():
 def main():
     for fn in [
         test_language_mapping,
+        test_cpp_only_enforcement,
+        test_verdict_application,
         test_submission_limits,
         test_status_mapping,
         test_marks_authority,

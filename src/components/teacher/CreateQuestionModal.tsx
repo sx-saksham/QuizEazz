@@ -41,16 +41,17 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
   const [marks, setMarks] = useState<number>(10)
   const [explanation, setExplanation] = useState('')
 
-  // Coding Specific Fields - Default to 'any'
-  const [language, setLanguage] = useState('any')
+  // Coding Specific Fields - QuizEazz V1 is C++ only. There is no language
+  // selector: every programming question is authored, stored and graded as C++.
+  const language = 'cpp'
   const [inputRequirements, setInputRequirements] = useState('')
   const [outputRequirements, setOutputRequirements] = useState('')
   const [constraints, setConstraints] = useState('')
   const [starterCode, setStarterCode] = useState(
-    '// Write your solution below in any supported language (Java, Python, C)\n'
+    '#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    // Write your C++ solution below\n    return 0;\n}\n'
   )
   const [referenceSolution, setReferenceSolution] = useState(
-    '// Optimal verified reference implementation\n'
+    '#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    // Optimal verified C++ reference implementation\n    return 0;\n}\n'
   )
 
   // MCQ Specific Fields
@@ -64,24 +65,6 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
 
   const [validationError, setValidationError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
-
-  const handleLanguageChange = (lang: string) => {
-    setLanguage(lang)
-
-    if (lang === 'any') {
-      setStarterCode('// Write your solution below in any supported language (Java, Python, C)\n')
-      setReferenceSolution('// Optimal verified reference implementation\n')
-    } else if (lang === 'java') {
-      setStarterCode('import java.util.*;\n\npublic class Solution {\n    public static void main(String[] args) {\n        // Write solution below\n    }\n}\n')
-      setReferenceSolution('import java.util.*;\n\npublic class Solution {\n    public static void main(String[] args) {\n        // Optimal verified reference implementation\n    }\n}\n')
-    } else if (lang === 'python') {
-      setStarterCode('def solution():\n    # Write your solution below\n    pass\n')
-      setReferenceSolution('def solution():\n    # Optimal verified reference implementation\n    return True\n')
-    } else if (lang === 'c') {
-      setStarterCode('#include <stdio.h>\n\nint main() {\n    // Write solution below\n    return 0;\n}\n')
-      setReferenceSolution('#include <stdio.h>\n\nint main() {\n    // Optimal verified reference implementation\n    return 0;\n}\n')
-    }
-  }
 
   const validate = (): string | null => {
     if (!title.trim()) return 'Please specify a question title.'
@@ -335,16 +318,12 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
                 <label className="block text-2xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">
                   Programming Language
                 </label>
-                <select
-                  value={language}
-                  onChange={(e) => handleLanguageChange(e.target.value)}
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                <div
+                  aria-label="Programming language"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-xs font-bold text-slate-700"
                 >
-                  <option value="any">Any</option>
-                  <option value="java">Java</option>
-                  <option value="python">Python</option>
-                  <option value="c">C</option>
-                </select>
+                  C++
+                </div>
               </div>
 
               <div className="sm:col-span-2">

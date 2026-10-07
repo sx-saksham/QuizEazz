@@ -23,6 +23,7 @@ import {
   Info,
 } from 'lucide-react'
 import { fetchQuestions } from '../../lib/teacherApi'
+import { languageLabel } from '../../lib/languages'
 import { useAsyncData } from '../../hooks/useAsyncData'
 
 export const TeacherQuestionsView: React.FC = () => {
@@ -251,12 +252,12 @@ export const TeacherQuestionsView: React.FC = () => {
               </Badge>
               {inspectingQuestion.language && (
                 <Badge variant="purple" size="sm">
-                  Language: {inspectingQuestion.language === 'any' ? 'Any' : inspectingQuestion.language.toUpperCase()}
+                  Language: {languageLabel(inspectingQuestion.language)}
                 </Badge>
               )}
               {inspectingQuestion.question_type === 'coding' && (
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                  <Info className="h-3 w-3" /> Code judging not yet connected
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                  <Info className="h-3 w-3" /> Auto-graded in C++ on submission
                 </span>
               )}
             </div>

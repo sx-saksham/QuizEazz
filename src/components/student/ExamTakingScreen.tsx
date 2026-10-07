@@ -28,7 +28,7 @@ import {
   submitExamAttempt,
   toErrorMessage,
 } from '../../lib/examEngine'
-import { LANGUAGE_OPTIONS } from '../../lib/languages'
+import { QUIZEAZZ_CPP_LANGUAGE_ID } from '../../lib/languages'
 import {
   isFullscreenActive,
   isFullscreenSupported,
@@ -71,8 +71,12 @@ type Phase = 'loading' | 'gate' | 'active'
  */
 const TRANSITION_BLUR_GRACE_MS = 700
 
-const monacoLanguage = (value: string): string =>
-  value === 'c' || value === 'cpp' ? 'cpp' : value
+/**
+ * QuizEazz V1 evaluates every programming answer as C++ (Judge0 54).
+ * There is no language selector: the editor, the persisted answer language
+ * and the grader all use this single canonical identifier.
+ */
+const CODE_LANGUAGE = QUIZEAZZ_CPP_LANGUAGE_ID
 
 
 export const ExamTakingScreen: React.FC = () => {
@@ -90,7 +94,7 @@ export const ExamTakingScreen: React.FC = () => {
   const [currentIndex, setCurrentIndex] = useState(0)
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [markedForReview, setMarkedForReview] = useState<Record<string, boolean>>({})
-  const [codeLanguage, setCodeLanguage] = useState('python')
+  // No language state: every programming answer is C++. See CODE_LANGUAGE.
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [saveError, setSaveError] = useState<string | null>(null)
 
@@ -267,7 +271,7 @@ export const ExamTakingScreen: React.FC = () => {
         attemptId: attempt.id,
         questionId: pending.questionId,
         content: pending.content,
-        language: codeLanguage,
+        language: CODE_LANGUAGE,
         isPaused,
         startedAt: attempt.started_at,
         durationMinutes,
@@ -286,7 +290,7 @@ export const ExamTakingScreen: React.FC = () => {
       setSaveState('failed')
       setSaveError(toErrorMessage(err, 'The answer could not be saved to the server.'))
     }
-  }, [attempt, codeLanguage, durationMinutes, isPaused])
+  }, [attempt, durationMinutes, isPaused])
 
   const scheduleSave = useCallback(
     (questionId: string, content: string) => {
@@ -312,10 +316,10 @@ export const ExamTakingScreen: React.FC = () => {
         attemptId: attempt.id,
         questionId: pending.questionId,
         content: pending.content,
-        language: codeLanguage,
+        language: CODE_LANGUAGE,
       }).catch(() => undefined)
     }
-  }, [attempt, codeLanguage])
+  }, [attempt])
 
   // ---------------------------------------------------------------
   // 4. Security events: window blur + tab hidden + fullscreen exit
@@ -1042,25 +1046,19 @@ export const ExamTakingScreen: React.FC = () => {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-slate-500 font-medium">Language:</span>
-                    <select
-                      value={codeLanguage}
-                      onChange={(e) => setCodeLanguage(e.target.value)}
+                    <span
                       aria-label="Programming language"
-                      className="text-xs rounded-lg border border-slate-300 py-1 px-2.5 bg-white font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="text-xs font-bold text-slate-700 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200"
                     >
-                      {LANGUAGE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
+                      C++
+                    </span>
                   </div>
                 </div>
 
                 <div className="rounded-xl border border-slate-300 overflow-hidden bg-[#1e1e1e]">
                   <Editor
                     height="380px"
-                    language={monacoLanguage(codeLanguage)}
+                    language="cpp"
                     value={currentAnswer || currentQuestion.starter_code || ''}
                     onChange={handleCodeChange}
                     theme="vs-dark"

@@ -80,14 +80,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     const isServiceRole = !!serviceRoleKey && bearer === serviceRoleKey
 
-    // The CALLER's client. It carries the student's own JWT, so auth.uid()
-    // resolves inside SQL. It is used for exactly two things: resolving the
-    // caller, and the ownership check below. It must NOT be used for the
-    // grading RPCs.
+    // The CALLER's client. It carries the student's own JWT in the
+    // Authorization header, so auth.uid() resolves inside SQL. It is used
+    // for exactly two things: resolving the caller, and the ownership check
+    // below. It must NOT be used for the grading RPCs.
+    //
+    // The second createClient argument must be the platform-provided anon
+    // key, NEVER the student's JWT: supabase-js sends that argument verbatim
+    // as the `apikey` header, and the Supabase gateway rejects a user JWT in
+    // `apikey` with 401 before GoTrue ever validates the user (which surfaced
+    // as {"error":"unauthenticated"}). The student's identity travels only in
+    // Authorization. SUPABASE_ANON_KEY is auto-injected by Supabase and is
+    // public by design, so this adds no secret.
     const caller = createClient(
       Deno.env.get('SUPABASE_URL') as string,
-      bearer,
-      { auth: { persistSession: false, autoRefreshToken: false } },
+      Deno.env.get('SUPABASE_ANON_KEY') as string,
+      {
+        global: {
+          headers: {
+            Authorization: `Bearer ${bearer}`,
+          },
+        },
+        auth: { persistSession: false, autoRefreshToken: false },
+      },
     )
 
     // The SERVICE-ROLE client. Migration 7 REVOKEs every Judge0 grading RPC

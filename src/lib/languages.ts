@@ -13,21 +13,21 @@
  * friendly name must never change what is stored or transmitted.
  */
 
+/**
+ * QuizEazz V1 supports exactly one programming language: C++.
+ *
+ * Canonical internal identifier: `cpp` (Judge0 language_id 54).
+ * Python, Java and C were removed permanently: there is no selector, no
+ * per-question language, and no mapping for them anywhere in the grading
+ * path. Do NOT re-add entries here without also restoring the Judge0
+ * mapping, the database validation and the teacher authoring UI.
+ */
+export const QUIZEAZZ_CPP_LANGUAGE_ID = 'cpp' as const
+
 /** Canonical internal identifier -> student-facing label. */
 export const LANGUAGE_LABELS: Readonly<Record<string, string>> = {
-  python: 'Python',
   cpp: 'C++',
-  java: 'Java',
-  c: 'C',
 }
-
-/** Selector order shown to the candidate. Values are canonical ids. */
-export const LANGUAGE_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: 'python', label: LANGUAGE_LABELS.python },
-  { value: 'cpp', label: LANGUAGE_LABELS.cpp },
-  { value: 'java', label: LANGUAGE_LABELS.java },
-  { value: 'c', label: LANGUAGE_LABELS.c },
-]
 
 /**
  * Resolves a stored language identifier to its display label.
