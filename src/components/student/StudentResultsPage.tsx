@@ -18,9 +18,7 @@ export const StudentResultsPage: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold tracking-tight text-slate-900">Results</h1>
           <p className="mt-1 text-xs text-slate-500">
-            Objective evaluation of your submitted examinations. Programming answers stay
-            &ldquo;Pending Evaluation&rdquo; until the isolated Judge0 CE sandbox is connected — no
-            marks are ever estimated for them.
+            Your programming answers are being evaluated in an isolated environment. No marks are awarded until a verdict is produced.
           </p>
         </div>
         <button
