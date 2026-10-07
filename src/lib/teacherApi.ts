@@ -154,6 +154,94 @@ export async function createQuestion(payload: {
   return question
 }
 
+export interface QuestionUpdate {
+  question_id: string
+  title?: string | null
+  question_text?: string | null
+  question_type?: 'mcq' | 'coding' | null
+  category?: string | null
+  subcategory?: string | null
+  marks?: number | null
+  explanation?: string | null
+  language?: string | null
+  input_requirements?: string | null
+  output_requirements?: string | null
+  constraints?: string | null
+  starter_code?: string | null
+  reference_solution?: string | null
+  options?: unknown
+  correct_answer?: string | null
+}
+
+/**
+ * Edits a bank question. Published exams, attempts and reviews read frozen
+ * snapshots, so no edit — however large — can rewrite history. Only NULL
+ * fields are left unchanged; the database re-validates everything supplied.
+ */
+export async function updateQuestion(payload: QuestionUpdate): Promise<Question> {
+  const updated = await callRpc<Question | Question[]>(
+    () =>
+      supabase.rpc('teacher_update_question', {
+        p_question_id: payload.question_id,
+        p_title: payload.title ?? null,
+        p_question_text: payload.question_text ?? null,
+        p_question_type: payload.question_type ?? null,
+        p_category: payload.category ?? null,
+        p_subcategory: payload.subcategory ?? null,
+        p_marks: payload.marks ?? null,
+        p_explanation: payload.explanation ?? null,
+        p_language: payload.language ?? null,
+        p_input_requirements: payload.input_requirements ?? null,
+        p_output_requirements: payload.output_requirements ?? null,
+        p_constraints: payload.constraints ?? null,
+        p_starter_code: payload.starter_code ?? null,
+        p_reference_solution: payload.reference_solution ?? null,
+        p_options: payload.options ?? null,
+        p_correct_answer: payload.correct_answer ?? null,
+      }),
+    'Unable to save the question changes.',
+  )
+
+  const question = Array.isArray(updated) ? updated[0] : updated
+  if (!question?.id) {
+    throw new Error(
+      'The database did not confirm the update. The question was NOT changed — please retry.',
+    )
+  }
+  return question
+}
+
+export interface ExamUpdate {
+  exam_id: string
+  title?: string | null
+  description?: string | null
+  duration_minutes?: number | null
+}
+
+/**
+ * Edits safe exam fields (title/description/duration). Blocked server-side
+ * once any finalized attempt exists; schedule keeps its own RPC/guard.
+ */
+export async function updateExam(payload: ExamUpdate): Promise<Exam> {
+  const updated = await callRpc<Exam>(
+    () =>
+      supabase.rpc('teacher_update_exam', {
+        p_exam_id: payload.exam_id,
+        p_title: payload.title ?? null,
+        p_description: payload.description ?? null,
+        p_duration_minutes: payload.duration_minutes ?? null,
+      }),
+    'Unable to save the examination changes.',
+  )
+
+  if (!updated?.id) {
+    throw new Error(
+      'The database did not confirm the update. The examination was NOT changed — please retry.',
+    )
+  }
+  return updated
+}
+
 export async function fetchExams(): Promise<Exam[]> {
   return callRpc<Exam[]>(
     () => supabase.rpc('teacher_get_exams'),

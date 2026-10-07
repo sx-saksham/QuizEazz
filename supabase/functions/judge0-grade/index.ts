@@ -239,6 +239,10 @@ async function gradeAttempt(
     source_code: string | null
     stdin: string | null
     marks_total: number
+    // Frozen per-exam snapshot of the question's hidden tests. Grading reads
+    // ONLY this — never the mutable bank rows — so a later bank edit cannot
+    // rewrite what this published exam grades against.
+    tests: unknown
   }>
 
   if (rows.length === 0) {
@@ -297,26 +301,13 @@ async function gradeAttempt(
     }
 
     // Semantic grading: run the submission once per VALIDATED hidden test
-    // case (expected_stdout IS NOT NULL) and compare normalized stdout.
-    // Stops at the first decisive case. 'Correct' requires every validated
-    // case to pass. A fetch failure leaves the answer pending (retryable);
-    // zero usable cases is a stable spec state recorded as System Error.
-    const { data: caseRows, error: casesErr } = await admin.rpc(
-      'quizeazz_judge0_test_cases',
-      { p_question_id: row.question_id },
-    )
-    if (casesErr) {
-      graded.push({
-        answer_id: row.answer_id,
-        outcome: null,
-        pending: true,
-        error: `test case lookup failed: ${casesErr.message}`,
-      })
-      continue
-    }
-    const usableCases = ((caseRows ?? []) as HiddenTestCase[])
-      .filter((tc) => tc.expected_stdout !== null && tc.expected_stdout !== undefined)
-      .sort((a, b) => a.case_order - b.case_order)
+    // case (expected_stdout IS NOT NULL) taken from the exam's FROZEN
+    // snapshot — never from the mutable bank. Stops at the first decisive
+    // case. 'Correct' requires every validated case to pass.
+    const snapshotCases = Array.isArray(row.tests) ? (row.tests as HiddenTestCase[]) : []
+    const usableCases = snapshotCases
+      .filter((tc) => tc && tc.expected_stdout !== null && tc.expected_stdout !== undefined)
+      .sort((a, b) => (a.case_order ?? 0) - (b.case_order ?? 0))
 
     if (usableCases.length === 0) {
       // No validated hidden test exists for this question, so correctness

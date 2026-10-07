@@ -24,7 +24,7 @@ import {
   Unlock,
   CalendarCog,
 } from 'lucide-react'
-import { createExam, fetchExams, setExamStatus } from '../../lib/teacherApi'
+import { createExam, fetchExams, setExamStatus, updateExam } from '../../lib/teacherApi'
 import { useAsyncData } from '../../hooks/useAsyncData'
 import { toErrorMessage } from '../../lib/supabase'
 
@@ -46,6 +46,54 @@ export const TeacherExamsView: React.FC = () => {
   const [paperFor, setPaperFor] = useState<Exam | null>(null)
   const [scheduleFor, setScheduleFor] = useState<Exam | null>(null)
   const [statusBusyId, setStatusBusyId] = useState<string | null>(null)
+
+  // Edit-details state. The modal remounts per exam (key) so fields always
+  // start from the stored row. Blocked server-side once finalized attempts
+  // exist; closed exams cannot be edited at all.
+  const [editingExam, setEditingExam] = useState<Exam | null>(null)
+  const [editTitle, setEditTitle] = useState('')
+  const [editDescription, setEditDescription] = useState('')
+  const [editDuration, setEditDuration] = useState(60)
+  const [editSaving, setEditSaving] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
+
+  const openEditDetails = (exam: Exam) => {
+    setEditTitle(exam.title)
+    setEditDescription(exam.description ?? '')
+    setEditDuration(exam.duration_minutes)
+    setEditError(null)
+    setEditingExam(exam)
+  }
+
+  const handleSaveDetails = async () => {
+    if (!editingExam || editSaving) return
+    if (!editTitle.trim()) {
+      setEditError('Please provide an examination title.')
+      return
+    }
+    const duration = Math.round(Number(editDuration))
+    if (!Number.isFinite(duration) || duration < 1 || duration > 1440) {
+      setEditError('Duration must be between 1 and 1440 minutes.')
+      return
+    }
+    setEditSaving(true)
+    setEditError(null)
+    try {
+      await updateExam({
+        exam_id: editingExam.id,
+        title: editTitle.trim(),
+        description: editDescription.trim() || null,
+        duration_minutes: duration,
+      })
+      setEditingExam(null)
+      setBanner({ type: 'success', message: 'Examination details saved.' })
+      reloadExams()
+    } catch (err) {
+      setEditError(toErrorMessage(err, 'Unable to save the examination changes.'))
+    } finally {
+      setEditSaving(false)
+    }
+  }
 
   const loadExams = useCallback(() => fetchExams(), [])
   const {
@@ -302,6 +350,13 @@ export const TeacherExamsView: React.FC = () => {
                     >
                       Manage Paper
                     </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => openEditDetails(exam)}
+                    >
+                      Edit
+                    </Button>
                     <button
                       title="Edit schedule"
                       onClick={() => setScheduleFor(exam)}
@@ -433,6 +488,95 @@ export const TeacherExamsView: React.FC = () => {
           </div>
         </form>
       </Modal>
+
+      {/* EDIT DETAILS — title/description/duration only. Blocked server-side
+          once finalized attempts exist; closed exams are frozen. */}
+      {editingExam && (
+        <Modal
+          key={editingExam.id}
+          isOpen={!!editingExam}
+          onClose={() => setEditingExam(null)}
+          title="Edit Examination Details"
+          subtitle={editingExam.title}
+          maxWidth="lg"
+        >
+          <div className="space-y-4">
+            {editError && (
+              <div className="flex items-start gap-2 rounded-lg bg-rose-50 border border-rose-200 p-3 text-xs text-rose-700">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-500" />
+                <span>{editError}</span>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Examination Title <span className="text-rose-500">*</span>
+              </label>
+              <Input
+                type="text"
+                required
+                value={editTitle}
+                onChange={(e) => setEditTitle(e.target.value)}
+                className="text-xs"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Description &amp; Instructions
+              </label>
+              <textarea
+                rows={3}
+                value={editDescription}
+                onChange={(e) => setEditDescription(e.target.value)}
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 placeholder-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Duration (Minutes) <span className="text-rose-500">*</span>
+              </label>
+              <Input
+                type="number"
+                min={1}
+                max={1440}
+                required
+                value={editDuration}
+                onChange={(e) => setEditDuration(Number(e.target.value))}
+                className="text-xs"
+              />
+            </div>
+
+            <p className="text-2xs text-slate-500 leading-relaxed">
+              Details cannot be changed once submissions exist for this examination. Use the
+              schedule control for timing and Manage Paper for questions.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-4 border-t border-slate-200">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setEditingExam(null)}
+                disabled={editSaving}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => void handleSaveDetails()}
+                disabled={editSaving}
+                isLoading={editSaving}
+              >
+                {editSaving ? 'Saving...' : 'Save Changes'}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {/* ASSIGN STUDENTS */}
       {assignFor && (

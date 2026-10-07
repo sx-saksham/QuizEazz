@@ -226,6 +226,152 @@ def test_verdict_application():
 
 
 # ---------------------------------------------------------------------------
+# 1d2. Exam snapshots + safe editing (Phase D)
+# ---------------------------------------------------------------------------
+MIG12 = SQL / "migration_12_exam_question_snapshots.sql"
+
+
+def _migration12_body():
+    return MIG12.read_text(encoding="utf-8") if MIG12.exists() else ""
+
+
+def test_snapshot_integrity():
+    check("migration 12 exists", MIG12.exists())
+    if not MIG12.exists():
+        return
+    t = _migration12_body()
+    # 6. Snapshot exists (column + builder + backfill-once).
+    check(
+        "exam_questions carries an immutable snapshot column",
+        re.search(r"ADD COLUMN IF NOT EXISTS question_snapshot JSONB", t) is not None,
+    )
+    check(
+        "snapshot builder captures all student-visible + grading fields",
+        all(k in t for k in (
+            "'title', v_q.title", "'question_text', v_q.question_text",
+            "'starter_code', v_q.starter_code", "'reference_solution', v_q.reference_solution",
+            "'options', COALESCE(v_q.options",
+        )),
+    )
+    check(
+        "snapshot builder captures hidden tests faithfully",
+        re.search(r"'tests', v_tests", t) is not None,
+    )
+    check(
+        "backfill is conditional (never overwrites)",
+        re.search(r"WHERE eq\.question_snapshot IS NULL", t) is not None,
+    )
+    # 4/8. Taking reads the snapshot; shape preserved; secrets never served.
+    check(
+        "exam taking serves snapshot content with live fallback",
+        re.search(r"COALESCE\(eq\.question_snapshot->>'title', q\.title\)", t) is not None,
+    )
+    def _fn_body(text, marker):
+        i = text.find(marker)
+        if i == -1:
+            return ""
+        j = text.find("$$;", text.find("AS $$", i))
+        return text[i:j] if j != -1 else text[i:]
+
+    for fn in ("get_exam_questions", "get_student_attempt_review", "teacher_get_attempt_detail"):
+        body = _fn_body(t, f"CREATE OR REPLACE FUNCTION public.{fn}(")
+        check(
+            f"read path {fn} never serves the reference solution",
+            "reference_solution" not in body,
+            "reference stays server-side; only the builder stores it",
+        )
+    # 6/13. Review reads the snapshot.
+    check(
+        "student review resolves titles from the snapshot",
+        re.search(r"'question_title', COALESCE\(eq\.question_snapshot->>'title', q\.title\)", t) is not None,
+    )
+    check(
+        "teacher detail resolves titles from the snapshot",
+        re.search(r"'title', COALESCE\(eq\.question_snapshot->>'title', q\.title\)", t) is not None,
+    )
+    # 7. Bank edits cannot touch snapshots or history.
+    ub = t[t.find("CREATE OR REPLACE FUNCTION public.teacher_update_question("):]
+    ub = ub[:ub.find("$$;", ub.find("AS $$"))] if "AS $$" in ub else ub
+    check(
+        "question-bank edits never write snapshots, papers, tests or attempts",
+        "question_snapshot" not in ub
+        and "exam_questions" not in ub
+        and "programming_test_cases" not in ub
+        and "exam_attempts" not in ub,
+    )
+    # 10/15/16. Grading reads snapshot tests, never the mutable bank table.
+    pb_start = t.find("CREATE FUNCTION public.quizeazz_judge0_pending_answers(")
+    pb = t[pb_start:t.find("$$;", t.find("AS $$", pb_start))]
+    check(
+        "pending answers carry snapshot tests",
+        "COALESCE(eq.question_snapshot->'tests'" in pb,
+    )
+    check(
+        "pending answers never read the mutable test table",
+        "programming_test_cases" not in pb,
+    )
+    check(
+        "gradeAttempt consumes the snapshot row, not the bank RPC",
+        (INDEX_TS.read_text(encoding="utf-8").count("quizeazz_judge0_test_cases") == 1),
+        "exactly one remaining call site: reference validation",
+    )
+    check(
+        "row tests feed the harness",
+        re.search(r"Array\.isArray\(row\.tests\)", INDEX_TS.read_text(encoding="utf-8")) is not None,
+    )
+    # 17. Historical MCQ option sets (with keys) survive in the snapshot.
+    check(
+        "snapshot preserves full MCQ options for deterministic review",
+        re.search(r"'options', COALESCE\(v_q\.options", t) is not None,
+    )
+    # 18/19. Published-paper immutability; drafts stay editable.
+    check(
+        "paper writes still require zero finalized attempts",
+        "quizeazz_assert_composition_editable(p_exam_id)" in t,
+    )
+
+
+def test_edit_rpcs_and_ui():
+    t = _migration12_body()
+    check(
+        "teacher_update_question exists with faculty gate",
+        re.search(r"CREATE OR REPLACE FUNCTION public\.teacher_update_question\(", t) is not None
+        and "Only faculty or administrators can edit questions" in t,
+    )
+    check(
+        "question edits enforce C++-only for coding",
+        "Programming questions must use language ''cpp''" in t,
+    )
+    check(
+        "teacher_update_exam exists with finalized-attempt guard",
+        re.search(r"CREATE OR REPLACE FUNCTION public\.teacher_update_exam\(", t) is not None
+        and "quizeazz_assert_composition_editable(p_exam_id)" in t,
+    )
+    modal = (SRC / "components" / "teacher" / "CreateQuestionModal.tsx").read_text(encoding="utf-8")
+    check(
+        "question modal supports edit mode from the stored row",
+        "editingQuestion" in modal and "updateQuestion" in modal,
+    )
+    check(
+        "edit form remounts per question (no stale state)",
+        re.search(r"key=\{editingQuestion\.id\}", (SRC / "components" / "teacher" / "TeacherQuestionsView.tsx").read_text(encoding="utf-8")) is not None,
+    )
+    check(
+        "bank list exposes an Edit action per question",
+        re.search(r"setEditingQuestion\(q\)", (SRC / "components" / "teacher" / "TeacherQuestionsView.tsx").read_text(encoding="utf-8")) is not None,
+    )
+    exams_view = (SRC / "components" / "teacher" / "TeacherExamsView.tsx").read_text(encoding="utf-8")
+    check(
+        "exam list exposes an Edit details action",
+        "openEditDetails" in exams_view and "updateExam" in exams_view,
+    )
+    check(
+        "exam edit UI states the finalized-attempt rule",
+        "once submissions exist" in exams_view,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 1d. Semantic grading: hidden tests, normalization, harness (Phase C)
 # ---------------------------------------------------------------------------
 MIG11 = SQL / "migration_11_hidden_tests_semantic_grading.sql"
@@ -999,6 +1145,8 @@ def main():
         test_language_mapping,
         test_cpp_only_enforcement,
         test_verdict_application,
+        test_snapshot_integrity,
+        test_edit_rpcs_and_ui,
         test_hidden_test_storage,
         test_normalization_semantics,
         test_harness_semantics,

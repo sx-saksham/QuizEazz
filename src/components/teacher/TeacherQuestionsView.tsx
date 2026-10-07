@@ -33,6 +33,7 @@ export const TeacherQuestionsView: React.FC = () => {
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false)
   const [inspectingQuestion, setInspectingQuestion] = useState<Question | null>(null)
   const [testsFor, setTestsFor] = useState<Question | null>(null)
+  const [editingQuestion, setEditingQuestion] = useState<Question | null>(null)
 
   // RPC-only. There is deliberately no fallback to direct table access.
   const load = useCallback(() => fetchQuestions(), [])
@@ -225,6 +226,13 @@ export const TeacherQuestionsView: React.FC = () => {
                     Hidden Tests
                   </Button>
                 )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setEditingQuestion(q)}
+                >
+                  Edit
+                </Button>
                 <Button
                   variant="outline"
                   size="sm"
@@ -425,6 +433,22 @@ export const TeacherQuestionsView: React.FC = () => {
         onClose={() => setShowCreateModal(false)}
         onQuestionCreated={reload}
       />
+
+      {/* Bank editing. Remount per question so the form always starts from
+          the stored row. Published exams are unaffected (frozen snapshots). */}
+      {editingQuestion && (
+        <CreateQuestionModal
+          key={editingQuestion.id}
+          isOpen={!!editingQuestion}
+          onClose={() => setEditingQuestion(null)}
+          onQuestionCreated={reload}
+          editingQuestion={editingQuestion}
+          onQuestionUpdated={() => {
+            setEditingQuestion(null)
+            reload()
+          }}
+        />
+      )}
 
       {/* Hidden test cases for one coding question (faculty only) */}
       <ManageTestsModal

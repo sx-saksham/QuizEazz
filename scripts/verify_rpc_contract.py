@@ -30,6 +30,7 @@ MIGRATION_ORDER = [
     "migration_09_cpp_only_and_verdict_fix.sql",
     "migration_10_class_batch_segregation.sql",
     "migration_11_hidden_tests_semantic_grading.sql",
+    "migration_12_exam_question_snapshots.sql",
 ]
 
 CREATE_RE = re.compile(

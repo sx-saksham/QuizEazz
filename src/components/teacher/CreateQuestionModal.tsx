@@ -10,7 +10,7 @@ import {
 import { Modal } from '../common/Modal'
 import { Button } from '../common/Button'
 import { Input } from '../common/Input'
-import { createQuestion } from '../../lib/teacherApi'
+import { createQuestion, updateQuestion } from '../../lib/teacherApi'
 import { toErrorMessage } from '../../lib/supabase'
 import type { Question } from '../../types'
 
@@ -23,45 +23,92 @@ interface CreateQuestionModalProps {
    * list can never diverge from what is actually persisted.
    */
   onQuestionCreated: (newQuestion: Question) => void
+  /**
+   * When set, the modal edits this bank question instead of creating one.
+   * Published exams, attempts and reviews read frozen snapshots, so no edit
+   * — however large — can rewrite history. The parent remounts this modal
+   * per question (key) so form state always starts from the stored row.
+   */
+  editingQuestion?: Question | null
+  onQuestionUpdated?: (updatedQuestion: Question) => void
+}
+
+function asOptionList(value: unknown): { id: string; text: string }[] {
+  if (!Array.isArray(value)) {
+    return [
+      { id: 'opt_1', text: '' },
+      { id: 'opt_2', text: '' },
+      { id: 'opt_3', text: '' },
+      { id: 'opt_4', text: '' },
+    ]
+  }
+  const mapped = (value as { id?: unknown; text?: unknown }[])
+    .filter((o) => o && typeof o.id === 'string')
+    .map((o) => ({ id: o.id as string, text: typeof o.text === 'string' ? o.text : '' }))
+  return mapped.length >= 2
+    ? mapped
+    : [
+        { id: 'opt_1', text: '' },
+        { id: 'opt_2', text: '' },
+        { id: 'opt_3', text: '' },
+        { id: 'opt_4', text: '' },
+      ]
+}
+
+function correctIdOf(question: Question | null | undefined): string {
+  if (!question) return 'opt_1'
+  if (question.correct_option_id) return question.correct_option_id
+  const opts = asOptionList(question.options)
+  const flagged = (question.options as { id?: unknown; is_correct?: unknown }[] | null)?.find?.(
+    (o) => o && typeof o === 'object' && (o as { is_correct?: unknown }).is_correct === true,
+  ) as { id?: unknown } | undefined
+  if (flagged && typeof flagged.id === 'string') return flagged.id
+  return opts[0]?.id ?? 'opt_1'
 }
 
 export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
   isOpen,
   onClose,
   onQuestionCreated,
+  editingQuestion,
+  onQuestionUpdated,
 }) => {
-  const [questionType, setQuestionType] = useState<'coding' | 'mcq'>('mcq')
+  const isEditing = !!editingQuestion
+  const [questionType, setQuestionType] = useState<'coding' | 'mcq'>(
+    editingQuestion?.question_type ?? 'mcq',
+  )
 
   // Common Fields
-  const [title, setTitle] = useState('')
-  const [statement, setStatement] = useState('')
-  const [category, setCategory] = useState('Data Structures')
-  const [subcategory, setSubcategory] = useState('Arrays')
+  const [title, setTitle] = useState(editingQuestion?.title ?? '')
+  const [statement, setStatement] = useState(editingQuestion?.question_text ?? '')
+  const [category, setCategory] = useState(editingQuestion?.category ?? 'Data Structures')
+  const [subcategory, setSubcategory] = useState(editingQuestion?.subcategory ?? 'Arrays')
   // Difficulty is assigned server-side and is not editable from this form.
-  const [marks, setMarks] = useState<number>(10)
-  const [explanation, setExplanation] = useState('')
+  const [marks, setMarks] = useState<number>(editingQuestion?.marks ?? 10)
+  const [explanation, setExplanation] = useState(editingQuestion?.explanation ?? '')
 
   // Coding Specific Fields - QuizEazz V1 is C++ only. There is no language
   // selector: every programming question is authored, stored and graded as C++.
   const language = 'cpp'
-  const [inputRequirements, setInputRequirements] = useState('')
-  const [outputRequirements, setOutputRequirements] = useState('')
-  const [constraints, setConstraints] = useState('')
+  const [inputRequirements, setInputRequirements] = useState(
+    editingQuestion?.input_requirements ?? '',
+  )
+  const [outputRequirements, setOutputRequirements] = useState(
+    editingQuestion?.output_requirements ?? '',
+  )
+  const [constraints, setConstraints] = useState(editingQuestion?.constraints ?? '')
   const [starterCode, setStarterCode] = useState(
-    '#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    // Write your C++ solution below\n    return 0;\n}\n'
+    editingQuestion?.starter_code ??
+      '#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    // Write your C++ solution below\n    return 0;\n}\n',
   )
   const [referenceSolution, setReferenceSolution] = useState(
-    '#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    // Optimal verified C++ reference implementation\n    return 0;\n}\n'
+    editingQuestion?.reference_solution ??
+      '#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    // Optimal verified C++ reference implementation\n    return 0;\n}\n',
   )
 
   // MCQ Specific Fields
-  const [options, setOptions] = useState([
-    { id: 'opt_1', text: '' },
-    { id: 'opt_2', text: '' },
-    { id: 'opt_3', text: '' },
-    { id: 'opt_4', text: '' },
-  ])
-  const [correctOptionId, setCorrectOptionId] = useState('opt_1')
+  const [options, setOptions] = useState(() => asOptionList(editingQuestion?.options))
+  const [correctOptionId, setCorrectOptionId] = useState(() => correctIdOf(editingQuestion))
 
   const [validationError, setValidationError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -102,8 +149,10 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
 
     try {
       // Authoritative SECURITY DEFINER RPC. Success is reported ONLY after the
-      // database confirms the insert. No optimistic local question is created.
-      const created = await createQuestion({
+      // database confirms the write. No optimistic local question is created.
+      // In edit mode every field is sent; published exams keep reading
+      // frozen snapshots regardless, so history cannot change.
+      const payload = {
         title: title.trim(),
         question_text: statement.trim(),
         question_type: questionType,
@@ -122,9 +171,13 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
             ? options.map((o) => ({ id: o.id, text: o.text.trim() }))
             : null,
         correct_answer: questionType === 'mcq' ? correctOptionId : null,
-      })
+      }
+      const saved = editingQuestion
+        ? await updateQuestion({ question_id: editingQuestion.id, ...payload })
+        : await createQuestion(payload)
 
-      onQuestionCreated(created as Question)
+      if (editingQuestion && onQuestionUpdated) onQuestionUpdated(saved as Question)
+      else onQuestionCreated(saved as Question)
       onClose()
     } catch (err) {
       setValidationError(toErrorMessage(err, 'Failed to save the question.'))
@@ -137,8 +190,12 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Create Examination Question"
-      subtitle="Define problem specifications • Internal evaluation cases derived automatically"
+      title={isEditing ? 'Edit Examination Question' : 'Create Examination Question'}
+      subtitle={
+        isEditing
+          ? 'Published exams keep their frozen snapshot — this edits only the bank version.'
+          : 'Define problem specifications • Internal evaluation cases derived automatically'
+      }
       maxWidth="xl"
       footer={
         <div className="flex items-center justify-between w-full">
