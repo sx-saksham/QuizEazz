@@ -4,6 +4,9 @@ export interface Profile {
   id: string
   full_name: string
   role: UserRole
+  /** Authoritative cohort membership. Null until the student onboards. */
+  class_name: string | null
+  batch: string | null
   created_at?: string
 }
 

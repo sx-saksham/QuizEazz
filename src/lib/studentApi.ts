@@ -105,10 +105,31 @@ export async function fetchMyProfile(): Promise<{
   id: string
   full_name: string
   role: string
+  class_name: string | null
+  batch: string | null
   created_at: string | null
 }> {
   return call(
     () => supabase.rpc('get_my_profile'),
     'Unable to load your platform profile.',
+  )
+}
+
+/**
+ * One-shot cohort onboarding. The database owns the write: exactly one row
+ * (the caller's own), exactly once (immutable afterwards), exactly the fixed
+ * vocabulary. There is no edit path; corrections are an administrator task.
+ */
+export async function setMyClassBatch(
+  className: string,
+  batch: string,
+): Promise<{ id: string; class_name: string; batch: string }> {
+  return call(
+    () =>
+      supabase.rpc('set_my_class_batch', {
+        p_class: className,
+        p_batch: batch,
+      }),
+    'Unable to save your class and batch.',
   )
 }

@@ -11,6 +11,9 @@ export interface Candidate {
   full_name: string | null
   email: string | null
   role: string
+  /** Authoritative cohort membership. Null until the student onboards. */
+  class_name: string | null
+  batch: string | null
   created_at: string | null
 }
 
@@ -247,15 +250,29 @@ export async function fetchExamAssignments(
   )
 }
 
+export interface AssignmentGroup {
+  class_name: string
+  batch: string
+}
+
+/**
+ * Persists the assigned cohort. When `group` is supplied, the backend
+ * verifies every id against that exact authoritative membership and rejects
+ * the whole write on any mismatch. When null, the legacy individual-pick
+ * path applies (membership still validated as registered students).
+ */
 export async function setExamAssignments(
   examId: string,
   studentIds: string[],
+  group?: AssignmentGroup | null,
 ): Promise<{ assigned_count: number; added: number; removed: number }> {
   return callRpc(
     () =>
       supabase.rpc('teacher_set_exam_assignments', {
         p_exam_id: examId,
         p_student_ids: studentIds,
+        p_class: group?.class_name ?? null,
+        p_batch: group?.batch ?? null,
       }),
     'Unable to save the assigned cohort.',
   )

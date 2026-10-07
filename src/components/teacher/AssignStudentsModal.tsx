@@ -10,6 +10,11 @@ import {
   setExamAssignments,
   type Candidate,
 } from '../../lib/teacherApi'
+import {
+  CLASS_OPTIONS,
+  BATCH_OPTIONS,
+  isCompleteGroup,
+} from '../../lib/cohort'
 import { toErrorMessage } from '../../lib/supabase'
 
 interface AssignStudentsModalProps {
@@ -37,6 +42,8 @@ export const AssignStudentsModal: React.FC<AssignStudentsModalProps> = ({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [initialCount, setInitialCount] = useState(0)
   const [search, setSearch] = useState('')
+  const [groupClass, setGroupClass] = useState('')
+  const [groupBatch, setGroupBatch] = useState('')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -51,6 +58,8 @@ export const AssignStudentsModal: React.FC<AssignStudentsModalProps> = ({
       setError(null)
       setSuccess(null)
       setSearch('')
+      setGroupClass('')
+      setGroupBatch('')
       try {
         const [roster, current] = await Promise.all([
           fetchCandidates(),
@@ -76,16 +85,26 @@ export const AssignStudentsModal: React.FC<AssignStudentsModalProps> = ({
     }
   }, [isOpen, examId])
 
+  // Group scoping: when a class and/or batch is chosen, only members of
+  // that group are shown. A complete group (class AND batch) is what Select
+  // All operates on and what the backend enforces on save.
+  const groupActive = isCompleteGroup(groupClass || null, groupBatch || null)
+
+  const groupMembers = useMemo(() => {
+    if (!groupActive) return candidates
+    return candidates.filter((c) => c.class_name === groupClass && c.batch === groupBatch)
+  }, [candidates, groupActive, groupClass, groupBatch])
+
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase()
-    if (!term) return candidates
-    return candidates.filter(
+    if (!term) return groupMembers
+    return groupMembers.filter(
       (c) =>
         c.full_name?.toLowerCase().includes(term) ||
         c.email?.toLowerCase().includes(term) ||
         c.id.toLowerCase().includes(term),
     )
-  }, [candidates, search])
+  }, [groupMembers, search])
 
   const toggle = (id: string) => {
     setSelected((prev) => {
@@ -104,6 +123,16 @@ export const AssignStudentsModal: React.FC<AssignStudentsModalProps> = ({
     })
   }
 
+  // Select All means ALL students of the selected class + batch, ignoring
+  // any search text. Individual rows remain toggleable afterwards.
+  const selectWholeGroup = () => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      groupMembers.forEach((c) => next.add(c.id))
+      return next
+    })
+  }
+
   const clearAll = () => setSelected(new Set())
 
   const handleSave = async () => {
@@ -111,12 +140,16 @@ export const AssignStudentsModal: React.FC<AssignStudentsModalProps> = ({
     setSaving(true)
     setError(null)
     setSuccess(null)
+    // The group travels with the request so the backend can verify every id
+    // against the authoritative membership. Without a complete group the
+    // legacy individual-pick path applies.
+    const group = groupActive ? { class_name: groupClass, batch: groupBatch } : null
     try {
-      const result = await setExamAssignments(examId, Array.from(selected))
+      const result = await setExamAssignments(examId, Array.from(selected), group)
       const count = result?.assigned_count ?? selected.size
       onSaved(count)
       setSuccess(
-        `Cohort saved. ${count} candidate${count === 1 ? '' : 's'} assigned` +
+        `Cohort saved${group ? ` for ${group.class_name} · ${group.batch}` : ''}. ${count} candidate${count === 1 ? '' : 's'} assigned` +
           (result?.added ? ` (${result.added} added)` : '') +
           (result?.removed ? ` (${result.removed} removed)` : '') +
           '.',
@@ -165,6 +198,60 @@ export const AssignStudentsModal: React.FC<AssignStudentsModalProps> = ({
           <NotificationBanner type="success" message={success} onClose={() => setSuccess(null)} />
         )}
 
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label
+              htmlFor="assign-class"
+              className="block text-2xs font-bold uppercase tracking-wider text-slate-500 mb-1"
+            >
+              Class
+            </label>
+            <select
+              id="assign-class"
+              value={groupClass}
+              onChange={(e) => setGroupClass(e.target.value)}
+              disabled={loading}
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
+            >
+              <option value="">All classes</option>
+              {CLASS_OPTIONS.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label
+              htmlFor="assign-batch"
+              className="block text-2xs font-bold uppercase tracking-wider text-slate-500 mb-1"
+            >
+              Batch
+            </label>
+            <select
+              id="assign-batch"
+              value={groupBatch}
+              onChange={(e) => setGroupBatch(e.target.value)}
+              disabled={loading}
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
+            >
+              <option value="">All batches</option>
+              {BATCH_OPTIONS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {groupActive && (
+          <p className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2">
+            {groupMembers.length} student{groupMembers.length === 1 ? '' : 's'} in {groupClass} ·{' '}
+            {groupBatch}. Select All assigns exactly this group.
+          </p>
+        )}
+
         <div className="flex flex-col sm:flex-row gap-2 items-center">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
@@ -177,9 +264,15 @@ export const AssignStudentsModal: React.FC<AssignStudentsModalProps> = ({
             />
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={selectAllVisible} disabled={loading}>
-              Select shown
-            </Button>
+            {groupActive ? (
+              <Button variant="ghost" size="sm" onClick={selectWholeGroup} disabled={loading}>
+                Select all {groupMembers.length} in group
+              </Button>
+            ) : (
+              <Button variant="ghost" size="sm" onClick={selectAllVisible} disabled={loading}>
+                Select shown
+              </Button>
+            )}
             <Button variant="ghost" size="sm" onClick={clearAll} disabled={loading}>
               Clear
             </Button>
@@ -232,6 +325,9 @@ export const AssignStudentsModal: React.FC<AssignStudentsModalProps> = ({
                     </span>
                     <span className="block text-2xs text-slate-400 truncate">
                       {c.email || c.id}
+                    </span>
+                    <span className="block text-2xs font-semibold text-slate-500 truncate">
+                      {c.class_name && c.batch ? `${c.class_name} · ${c.batch}` : 'No class assigned'}
                     </span>
                   </span>
 

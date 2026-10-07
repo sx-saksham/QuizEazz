@@ -45,6 +45,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         id: row.id,
         full_name: row.full_name || 'Candidate',
         role: coerceRole(row.role),
+        class_name: row.class_name ?? null,
+        batch: row.batch ?? null,
         created_at: row.created_at ?? undefined,
       }
       setProfile(nextProfile)

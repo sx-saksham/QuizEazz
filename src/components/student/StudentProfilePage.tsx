@@ -103,6 +103,18 @@ export const StudentProfilePage: React.FC = () => {
 
           <div className="p-4 rounded-xl border border-slate-100 bg-slate-50/60">
             <div className="flex items-center gap-2 text-2xs font-semibold uppercase tracking-wider text-slate-400 mb-1">
+              <GraduationCap className="h-3.5 w-3.5 text-slate-500" />
+              Class / Batch
+            </div>
+            <p className="text-sm font-semibold text-slate-800">
+              {profile?.class_name && profile?.batch
+                ? `${profile.class_name} · ${profile.batch}`
+                : 'Not assigned yet'}
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl border border-slate-100 bg-slate-50/60">
+            <div className="flex items-center gap-2 text-2xs font-semibold uppercase tracking-wider text-slate-400 mb-1">
               <Calendar className="h-3.5 w-3.5 text-slate-500" />
               Account Created
             </div>
