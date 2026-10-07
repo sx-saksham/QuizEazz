@@ -158,6 +158,47 @@ export function resolveLanguageId(identifier: string | null | undefined): number
   return null
 }
 
+/**
+ * A hidden test case for semantic grading. Fetched service-role-only; never
+ * present in any browser request, response, or bundle.
+ */
+export interface HiddenTestCase {
+  case_order: number
+  stdin: string | null
+  expected_stdout: string | null
+}
+
+/**
+ * Deterministic stdout normalization for expected-output comparison.
+ *
+ * Exactly this, nothing more:
+ *  - CRLF and lone CR become LF
+ *  - trailing spaces/tabs are removed at the end of every line
+ *  - all trailing newlines at the very end are removed ("final newline"
+ *    normalized, so "0", "0\n" and "0\n\n" are equal)
+ *
+ * Significant on purpose: leading whitespace, internal whitespace, blank
+ * lines in the middle, and any other content difference still mismatch.
+ * No fuzzy matching, ever.
+ */
+export function normalizeProgramOutput(text: string | null | undefined): string {
+  if (text === null || text === undefined) return ''
+  const lf = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const stripped = lf
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+$/, ''))
+    .join('\n')
+  return stripped.replace(/\n+$/, '')
+}
+
+/** True only when the normalized outputs are exactly equal. */
+export function outputsMatch(
+  actual: string | null | undefined,
+  expected: string | null | undefined,
+): boolean {
+  return normalizeProgramOutput(actual) === normalizeProgramOutput(expected)
+}
+
 export interface BuildSubmissionInput {
   language: string | null | undefined
   sourceCode: string

@@ -6,6 +6,7 @@ import { Badge } from '../common/Badge'
 import { Modal } from '../common/Modal'
 import { EmptyState } from '../common/EmptyState'
 import { CreateQuestionModal } from './CreateQuestionModal'
+import { ManageTestsModal } from './ManageTestsModal'
 import {
   Database,
   Plus,
@@ -31,6 +32,7 @@ export const TeacherQuestionsView: React.FC = () => {
   const [selectedType, setSelectedType] = useState<string>('all')
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false)
   const [inspectingQuestion, setInspectingQuestion] = useState<Question | null>(null)
+  const [testsFor, setTestsFor] = useState<Question | null>(null)
 
   // RPC-only. There is deliberately no fallback to direct table access.
   const load = useCallback(() => fetchQuestions(), [])
@@ -214,6 +216,15 @@ export const TeacherQuestionsView: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
+                {q.question_type === 'coding' && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setTestsFor(q)}
+                  >
+                    Hidden Tests
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -413,6 +424,13 @@ export const TeacherQuestionsView: React.FC = () => {
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
         onQuestionCreated={reload}
+      />
+
+      {/* Hidden test cases for one coding question (faculty only) */}
+      <ManageTestsModal
+        questionId={testsFor?.id ?? null}
+        questionTitle={testsFor?.title ?? ''}
+        onClose={() => setTestsFor(null)}
       />
     </div>
   )

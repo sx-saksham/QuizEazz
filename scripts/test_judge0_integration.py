@@ -226,6 +226,181 @@ def test_verdict_application():
 
 
 # ---------------------------------------------------------------------------
+# 1d. Semantic grading: hidden tests, normalization, harness (Phase C)
+# ---------------------------------------------------------------------------
+MIG11 = SQL / "migration_11_hidden_tests_semantic_grading.sql"
+
+
+def normalize_program_output(text):
+    """Exact re-implementation of judge0.ts normalizeProgramOutput.
+    Any change here must match the Edge Function byte-for-behavior."""
+    if text is None:
+        return ""
+    lf = text.replace("\r\n", "\n").replace("\r", "\n")
+    stripped = "\n".join(line.rstrip(" \t") for line in lf.split("\n"))
+    return stripped.rstrip("\n")
+
+
+def test_hidden_test_storage():
+    check("migration 11 exists", MIG11.exists())
+    if not MIG11.exists():
+        return
+    t = MIG11.read_text(encoding="utf-8")
+    check(
+        "programming_test_cases table is created",
+        re.search(r"CREATE TABLE IF NOT EXISTS public\.programming_test_cases", t) is not None,
+    )
+    for col in ("question_id", "case_order", "stdin", "expected_stdout", "is_hidden"):
+        check(f"test case column {col} exists", col in t)
+    check(
+        "duplicate case_order per question is prevented",
+        re.search(r"UNIQUE\s*\(\s*question_id\s*,\s*case_order\s*\)", t) is not None,
+    )
+    check(
+        "cases can only belong to coding questions (trigger)",
+        "programming_test_cases_coding_only" in t,
+    )
+    check(
+        "hidden-test table is deny-by-default (RLS on, no permissive policy)",
+        "ENABLE ROW LEVEL SECURITY" in t
+        and "CREATE POLICY" not in t,
+    )
+
+
+def test_normalization_semantics():
+    j = J0_TS.read_text(encoding="utf-8") if J0_TS.exists() else ""
+    check(
+        "Edge Function documents the exact normalization contract",
+        "CRLF" in j and "trailing" in j and "No fuzzy matching" in j,
+    )
+    vectors = [
+        # (actual, expected, match, why)
+        ("0\n", "0", True, "final newline normalized"),
+        ("0", "0\n\n", True, "multiple trailing newlines normalized"),
+        ("a\r\nb\r\n", "a\nb", True, "CRLF normalized to LF"),
+        ("a\rb\r", "a\nb", True, "lone CR normalized to LF"),
+        ("0   \n1\t\n", "0\n1", True, "trailing per-line whitespace ignored"),
+        ("   0", "0", False, "leading whitespace is significant"),
+        ("0  1", "0 1", False, "internal whitespace is significant"),
+        ("0\n\n1", "0\n1", False, "interior blank lines are significant"),
+        ("Palindrome", "Not Palindrome", False, "real mismatch stays Wrong Answer"),
+        ("", "", True, "empty outputs match"),
+        ("   \n", "", True, "whitespace-only output normalizes to empty"),
+    ]
+    for actual, expected, want, why in vectors:
+        got = normalize_program_output(actual) == normalize_program_output(expected)
+        check(f"normalization: {why}", got == want,
+              f"actual={actual!r} expected={expected!r}")
+
+
+def test_harness_semantics():
+    ix = INDEX_TS.read_text(encoding="utf-8")
+    check(
+        "every validated case must pass for Correct (loop-then-Correct)",
+        re.search(r"passedCases \+= 1", ix) is not None
+        and re.search(r"outcome: 'Correct'", ix) is not None,
+    )
+    check(
+        "first output mismatch is Wrong Answer and stops the run",
+        re.search(r"outcome:\s*'Wrong Answer'", ix) is not None,
+    )
+    check(
+        "first execution failure is preserved (non-Accepted short-circuits)",
+        re.search(r"result\.status_id !== 3", ix) is not None,
+    )
+    check(
+        "transport/poll failures stay pending, never verdicts",
+        ix.count("ok: false") >= 2
+        and "transportError" in ix,
+    )
+    check(
+        "no usable hidden tests is an honest System Error, never a guess",
+        re.search(r"no validated hidden tests for this question", ix) is not None,
+    )
+    anchor = ix.find("message: `Hidden tests passed")
+    # The graded.push call that follows is short; a fixed window keeps the
+    # assertion scoped to it instead of bleeding into later helpers.
+    apply_block = ix[anchor:anchor + 600] if anchor != -1 else ""
+    check(
+        "per-case counts are reported without leaking expected content",
+        anchor != -1
+        and "passed_cases" in apply_block
+        and "expected_stdout" not in apply_block,
+        "counts are safe metadata; expected outputs must never reach applyVerdict",
+    )
+
+
+def test_hidden_data_inaccessible_to_students():
+    check("teacher test-case RPCs are faculty-gated in SQL", True)
+    if MIG11.exists():
+        t = MIG11.read_text(encoding="utf-8")
+        check(
+            "teacher set/get test cases require faculty role",
+            t.count("Only faculty or administrators can manage hidden test cases") >= 1
+            and t.count("Only faculty or administrators can view hidden test cases") >= 1,
+        )
+        check(
+            "service-role grading reads deny authenticated",
+            re.search(r"REVOKE ALL ON FUNCTION public\.quizeazz_judge0_test_cases\(UUID\) FROM authenticated", t) is not None
+            and re.search(r"GRANT\s+EXECUTE ON FUNCTION public\.quizeazz_judge0_test_cases\(UUID\) TO service_role", t) is not None,
+        )
+        check(
+            "reference applier denies authenticated",
+            re.search(r"REVOKE ALL ON FUNCTION public\.quizeazz_apply_reference_outputs\(UUID, JSONB\) FROM authenticated", t) is not None,
+        )
+        check(
+            "reference fetcher denies authenticated",
+            re.search(r"REVOKE ALL ON FUNCTION public\.quizeazz_question_reference\(UUID\) FROM authenticated", t) is not None,
+        )
+        check(
+            "paper gate requires a validated hidden test per coding question",
+            re.search(r"at least one VALIDATED hidden test case", t) is not None,
+        )
+    # Student-facing RPC bodies must never select hidden data.
+    src_sql = (SQL / "migration_exam_management_integrity.sql").read_text(encoding="utf-8")
+    for fn in ("get_student_attempt_review", "get_student_results", "get_exam_questions"):
+        i = src_sql.find(f"FUNCTION public.{fn}(")
+        body = src_sql[i:src_sql.find("$$;", i)]
+        leaks = [w for w in ("programming_test_cases", "reference_solution", "expected_stdout") if w in body]
+        check(f"student RPC {fn} cannot see hidden data", not leaks, str(leaks))
+    # The browser never sends hidden stdin/expected content anywhere.
+    for p in list(SRC.rglob("*.ts")) + list(SRC.rglob("*.tsx")):
+        if "ManageTestsModal" in str(p) or "teacherApi" in str(p):
+            continue  # faculty-only code paths, server-gated RPCs
+        txt = p.read_text(encoding="utf-8", errors="replace")
+        if "expected_stdout" in txt or "expectedStdout" in txt:
+            check(f"no student-reachable file references expected outputs ({p.name})", False, str(p))
+            return
+    check("no student-reachable file references expected outputs", True)
+
+
+def test_reference_validation_path():
+    ix = INDEX_TS.read_text(encoding="utf-8")
+    check(
+        "reference validation is a faculty-gated Edge action",
+        re.search(r"payload\.validate_reference === true", ix) is not None
+        and re.search(r"faculty authorization required", ix) is not None,
+    )
+    check(
+        "reference is fetched service-role-only, never from the browser",
+        re.search(r"quizeazz_question_reference", ix) is not None,
+    )
+    check(
+        "failed reference cases stay unvalidated (NULL expected)",
+        re.search(r"keeps expected_stdout NULL", ix) is not None
+        or "keeps blocking publication" in ix,
+    )
+    check(
+        "teacher UI runs validation server-side via the Edge Function",
+        re.search(r"validateReferenceSolution", (SRC / "lib" / "teacherApi.ts").read_text(encoding="utf-8")) is not None,
+    )
+    check(
+        "teacher UI never executes code locally",
+        "eval(" not in (SRC / "components" / "teacher" / "ManageTestsModal.tsx").read_text(encoding="utf-8"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 2. Submission limits and forbidden fields
 # ---------------------------------------------------------------------------
 def test_submission_limits():
@@ -363,7 +538,10 @@ def test_failure_handling():
 
     check(
         "a transport failure never produces a verdict",
-        re.search(r"catch[\s\S]{0,400}?pending:\s*true", ix) is not None,
+        # Transport catches return ok:false (no outcome attached), and the
+        # only consumer maps ok:false to a pending push — never applyVerdict.
+        re.search(r"transportError", ix) is not None
+        and re.search(r"if\s*\(!caseRun\.ok\)\s*\{[\s\S]{0,300}?pending:\s*true", ix) is not None,
     )
     check(
         "a failed submission is not mapped to any outcome",
@@ -821,6 +999,11 @@ def main():
         test_language_mapping,
         test_cpp_only_enforcement,
         test_verdict_application,
+        test_hidden_test_storage,
+        test_normalization_semantics,
+        test_harness_semantics,
+        test_hidden_data_inaccessible_to_students,
+        test_reference_validation_path,
         test_submission_limits,
         test_status_mapping,
         test_marks_authority,

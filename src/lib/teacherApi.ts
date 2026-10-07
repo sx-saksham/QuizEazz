@@ -278,6 +278,78 @@ export async function setExamAssignments(
   )
 }
 
+export interface HiddenTestCase {
+  id: string
+  case_order: number
+  stdin: string
+  expected_stdout: string | null
+  validated: boolean
+}
+
+export interface ReferenceValidationResult {
+  case_order: number
+  ok: boolean
+  status_id: number | null
+  stdout_preview: string | null
+  error?: string
+}
+
+/**
+ * Reads hidden test cases for a coding question. Faculty-only RPC; students
+ * have no path to this data (no RLS grant, no student RPC returns it).
+ */
+export async function fetchTestCases(
+  questionId: string,
+): Promise<{ question_id: string; cases: HiddenTestCase[] }> {
+  return callRpc(
+    () => supabase.rpc('teacher_get_test_cases', { p_question_id: questionId }),
+    'Unable to load the hidden test cases.',
+  )
+}
+
+/**
+ * Replaces the full hidden-test set in one transaction. Only stdin values
+ * are sent; expected outputs are produced exclusively by reference
+ * validation (never typed by hand into the grading path).
+ */
+export async function saveTestCases(
+  questionId: string,
+  stdins: string[],
+): Promise<{ question_id: string; saved: number }> {
+  return callRpc(
+    () =>
+      supabase.rpc('teacher_set_test_cases', {
+        p_question_id: questionId,
+        p_cases: stdins.map((stdin) => ({ stdin })),
+      }),
+    'Unable to save the hidden test cases.',
+  )
+}
+
+export interface ReferenceValidationReport {
+  ok: boolean
+  validated?: number
+  total?: number
+  error?: string
+  results?: ReferenceValidationResult[]
+}
+
+/**
+ * Runs the stored faculty reference solution through Judge0 (server-side
+ * only) once per hidden-test stdin and stores each cleanly-succeeded run's
+ * normalized stdout as that case's expected output. Faculty-only; the
+ * reference solution and all outputs stay server-side.
+ */
+export async function validateReferenceSolution(
+  questionId: string,
+): Promise<ReferenceValidationReport> {
+  const { data, error } = await supabase.functions.invoke('judge0-grade', {
+    body: { validate_reference: true, question_id: questionId },
+  })
+  if (error) throw new Error(rpcErrorMessage(error, 'Reference validation could not be started.'))
+  return (data ?? { ok: false }) as ReferenceValidationReport
+}
+
 export async function fetchExamPaper(examId: string): Promise<ExamPaper> {
   return callRpc<ExamPaper>(
     () => supabase.rpc('teacher_get_exam_paper', { p_exam_id: examId }),

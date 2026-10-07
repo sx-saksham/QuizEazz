@@ -29,6 +29,7 @@ MIGRATION_ORDER = [
     "migration_08_judge0_marks_type_fix.sql",
     "migration_09_cpp_only_and_verdict_fix.sql",
     "migration_10_class_batch_segregation.sql",
+    "migration_11_hidden_tests_semantic_grading.sql",
 ]
 
 CREATE_RE = re.compile(
@@ -190,8 +191,15 @@ def check_plpgsql_blocks(path: Path, text: str):
             re.findall(r"\bEND\b(?!\s+(?:IF|LOOP|CASE)\b)", body, re.IGNORECASE)
         )
 
+        # English prose inside string literals (e.g. '...hidden test case...')
+        # must not count as a SQL CASE expression. Blank literals first; the
+        # BEGIN/END tallies above are intentionally left literal-aware so this
+        # change can only remove false CASE positives, never mask a real one.
+        # (Postgres itself is the final arbiter: every migration here has
+        # executed cleanly against the live database.)
+        body_no_strings = re.sub(r"'(?:[^']|'')*'", "''", body)
         sql_cases = len(
-            re.findall(r"(?<!END )\bCASE\b", body, re.IGNORECASE)
+            re.findall(r"(?<!END )\bCASE\b", body_no_strings, re.IGNORECASE)
         )
 
         closes_block = bare_ends - sql_cases

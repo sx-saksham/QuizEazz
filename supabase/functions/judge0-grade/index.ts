@@ -29,9 +29,13 @@ import {
   SUBMISSION_LIMITS,
   buildSubmissionBody,
   mapJudge0Result,
+  normalizeProgramOutput,
+  outputsMatch,
   pollUntilVerdict,
   submitProgram,
+  type HiddenTestCase,
   type Judge0Outcome,
+  type Judge0ResultFields,
 } from './judge0.ts'
 
 const POLL_ATTEMPTS = 20
@@ -122,11 +126,34 @@ Deno.serve(async (req: Request): Promise<Response> => {
       { auth: { persistSession: false, autoRefreshToken: false } },
     )
 
-    let payload: { attempt_id?: string; sweep?: boolean }
+    let payload: { attempt_id?: string; sweep?: boolean; validate_reference?: boolean; question_id?: string }
     try {
       payload = await req.json()
     } catch {
       return json({ error: 'invalid json body' }, 400)
+    }
+
+    // ---------------------------------------------------------------
+    // Reference-validation mode: run the faculty reference solution through
+    // Judge0 once per hidden-test stdin and store the produced stdout as the
+    // expected output. Teacher-only (service role or faculty JWT). The
+    // reference solution is fetched service-role-only and never leaves the
+    // server; Judge0 is the sole executor. A case whose reference run does
+    // not cleanly succeed keeps expected_stdout NULL (unvalidated), so the
+    // paper gate keeps blocking publication until every case validates.
+    // ---------------------------------------------------------------
+    if (payload.validate_reference === true) {
+      const questionId = payload.question_id
+      if (!questionId || typeof questionId !== 'string') {
+        return json({ error: 'question_id is required' }, 400)
+      }
+      if (!isServiceRole) {
+        const { data: userData, error: userErr } = await caller.auth.getUser(bearer)
+        if (userErr || !userData?.user) return json({ error: 'unauthenticated' }, 401)
+        const { data: isFaculty, error: facultyErr } = await caller.rpc('quizeazz_caller_is_faculty')
+        if (facultyErr || !isFaculty) return json({ error: 'faculty authorization required' }, 403)
+      }
+      return json(await validateReference(cfg, admin, questionId))
     }
 
     // ---------------------------------------------------------------
@@ -207,6 +234,7 @@ async function gradeAttempt(
 
   const rows = (pending ?? []) as Array<{
     answer_id: string
+    question_id: string
     language: string | null
     source_code: string | null
     stdin: string | null
@@ -268,46 +296,60 @@ async function gradeAttempt(
       continue
     }
 
-    let submissionToken: string
-    try {
-      submissionToken = await submitProgram(cfg, built.body)
-    } catch (err) {
-      // TRANSPORT FAILURE. The answer stays exactly as it is: pending.
-      // A Judge0 outage must never be recorded as Wrong Answer.
+    // Semantic grading: run the submission once per VALIDATED hidden test
+    // case (expected_stdout IS NOT NULL) and compare normalized stdout.
+    // Stops at the first decisive case. 'Correct' requires every validated
+    // case to pass. A fetch failure leaves the answer pending (retryable);
+    // zero usable cases is a stable spec state recorded as System Error.
+    const { data: caseRows, error: casesErr } = await admin.rpc(
+      'quizeazz_judge0_test_cases',
+      { p_question_id: row.question_id },
+    )
+    if (casesErr) {
       graded.push({
         answer_id: row.answer_id,
         outcome: null,
         pending: true,
-        error: err instanceof Error ? err.message : 'judge0 submission failed',
+        error: `test case lookup failed: ${casesErr.message}`,
       })
       continue
     }
+    const usableCases = ((caseRows ?? []) as HiddenTestCase[])
+      .filter((tc) => tc.expected_stdout !== null && tc.expected_stdout !== undefined)
+      .sort((a, b) => a.case_order - b.case_order)
 
-    let result
-    try {
-      result = await pollUntilVerdict(cfg, submissionToken, {
-        attempts: POLL_ATTEMPTS,
-        delayMs: POLL_DELAY_MS,
+    if (usableCases.length === 0) {
+      // No validated hidden test exists for this question, so correctness
+      // is unprovable. An honest System Error (zero marks), never a guess
+      // and never an exit-code-only 'Correct'.
+      const applied = await applyVerdict(admin, {
+        attemptId,
+        answerId: row.answer_id,
+        submissionToken: null,
+        outcome: 'System Error',
+        statusId: null,
+        exitCode: null,
+        memory: null,
+        time: null,
+        stdout: null,
+        stderr: null,
+        compileOutput: null,
+        message: 'no validated hidden tests for this question',
       })
-    } catch (err) {
-      graded.push({
-        answer_id: row.answer_id,
-        outcome: null,
-        pending: true,
-        error: err instanceof Error ? err.message : 'judge0 poll failed',
-      })
+      graded.push({ answer_id: row.answer_id, outcome: 'System Error', applied })
       continue
     }
 
-    const verdict = mapJudge0Result(result, SUBMISSION_LIMITS.memory_limit)
-
-    if (verdict.pending) {
-      // Deadline reached with no real verdict. Leave it pending for a sweep.
+    const caseRun = await runHiddenTests(cfg, {
+      sourceCode: row.source_code,
+      cases: usableCases,
+    })
+    if (!caseRun.ok) {
       graded.push({
         answer_id: row.answer_id,
         outcome: null,
         pending: true,
-        submission_token: submissionToken,
+        error: caseRun.transportError,
       })
       continue
     }
@@ -315,22 +357,24 @@ async function gradeAttempt(
     const applied = await applyVerdict(admin, {
       attemptId,
       answerId: row.answer_id,
-      submissionToken,
-      outcome: verdict.outcome as Judge0Outcome,
-      statusId: verdict.statusId,
-      exitCode: typeof result.exit_code === 'number' ? result.exit_code : null,
-      memory: typeof result.memory === 'number' ? result.memory : null,
-      time: result.time ?? null,
-      stdout: result.stdout ?? null,
-      stderr: result.stderr ?? null,
-      compileOutput: result.compile_output ?? null,
-      message: result.message ?? null,
+      submissionToken: caseRun.submissionToken,
+      outcome: caseRun.outcome,
+      statusId: caseRun.statusId,
+      exitCode: caseRun.exitCode,
+      memory: caseRun.memory,
+      time: caseRun.time,
+      stdout: caseRun.stdout,
+      stderr: caseRun.stderr,
+      compileOutput: caseRun.compileOutput,
+      message: `Hidden tests passed: ${caseRun.passedCases}/${caseRun.totalCases}`,
     })
 
     graded.push({
       answer_id: row.answer_id,
-      outcome: verdict.outcome,
-      status_id: verdict.statusId,
+      outcome: caseRun.outcome,
+      status_id: caseRun.statusId,
+      passed_cases: caseRun.passedCases,
+      total_cases: caseRun.totalCases,
       applied,
     })
   }
@@ -347,6 +391,271 @@ async function gradeAttempt(
     results: graded,
     finalize_error: finalizeErr ? finalizeErr.message : null,
   }
+}
+
+/**
+ * Runs one submission per hidden test case, in case_order, stopping at the
+ * first decisive case. A non-Accepted terminal status (CE/RE/TLE/MLE/System)
+ * is preserved as-is; an Accepted run whose normalized stdout mismatches is
+ * Wrong Answer. Only all-cases-pass yields Correct.
+ *
+ * Transport failures and poll deadlines are NOT verdicts: they return
+ * ok:false so the caller leaves the answer pending for a later sweep.
+ * Judge0 is the sole executor; nothing here runs student code locally.
+ */
+interface CaseRunSuccess {
+  ok: true
+  outcome: Judge0Outcome
+  statusId: number | null
+  exitCode: number | null
+  memory: number | null
+  time: string | number | null
+  stdout: string | null
+  stderr: string | null
+  compileOutput: string | null
+  submissionToken: string
+  passedCases: number
+  totalCases: number
+}
+
+interface CaseRunTransport {
+  ok: false
+  transportError: string
+}
+
+async function runHiddenTests(
+  cfg: { baseUrl: string; token: string },
+  input: { sourceCode: string; cases: HiddenTestCase[] },
+): Promise<CaseRunSuccess | CaseRunTransport> {
+  let passedCases = 0
+  // Decisive run evidence. Initialized empty; always overwritten by the
+  // first completed Judge0 run before any ok:true return below.
+  let last: {
+    submissionToken: string
+    statusId: number | null
+    exitCode: number | null
+    memory: number | null
+    time: string | number | null
+    stdout: string | null
+    stderr: string | null
+    compileOutput: string | null
+  } = {
+    submissionToken: '',
+    statusId: null,
+    exitCode: null,
+    memory: null,
+    time: null,
+    stdout: null,
+    stderr: null,
+    compileOutput: null,
+  }
+
+  for (const tc of input.cases) {
+    const built = buildSubmissionBody({
+      language: 'cpp',
+      sourceCode: input.sourceCode,
+      stdin: tc.stdin ?? null,
+    })
+    if (!built.ok) {
+      // Unreachable in practice (language is forced, source non-empty), but
+      // fail safe rather than submitting something unvalidated.
+      return {
+        ok: true,
+        outcome: 'System Error',
+        ...last,
+        passedCases,
+        totalCases: input.cases.length,
+      }
+    }
+
+    let submissionToken: string
+    try {
+      submissionToken = await submitProgram(cfg, built.body)
+    } catch (err) {
+      return {
+        ok: false,
+        transportError: err instanceof Error ? err.message : 'judge0 submission failed',
+      }
+    }
+
+    let result: Judge0ResultFields
+    try {
+      result = await pollUntilVerdict(cfg, submissionToken, {
+        attempts: POLL_ATTEMPTS,
+        delayMs: POLL_DELAY_MS,
+      })
+    } catch (err) {
+      return {
+        ok: false,
+        transportError: err instanceof Error ? err.message : 'judge0 poll failed',
+      }
+    }
+
+    if (result.status_id === null) {
+      // Poll deadline with no verdict. Not a verdict — leave pending.
+      return { ok: false, transportError: 'judge0 verdict deadline exceeded' }
+    }
+
+    last = {
+      submissionToken,
+      statusId: result.status_id,
+      exitCode: typeof result.exit_code === 'number' ? result.exit_code : null,
+      memory: typeof result.memory === 'number' ? result.memory : null,
+      time: result.time ?? null,
+      stdout: result.stdout ?? null,
+      stderr: result.stderr ?? null,
+      compileOutput: result.compile_output ?? null,
+    }
+
+    if (result.status_id !== 3) {
+      // First meaningful execution failure wins; further cases cannot change
+      // a non-Accepted terminal status into Correct. Stop here.
+      const mapped = mapJudge0Result(result, SUBMISSION_LIMITS.memory_limit)
+      return { ok: true, outcome: mapped.outcome, ...last, passedCases, totalCases: input.cases.length }
+    }
+
+    if (!outputsMatch(result.stdout, tc.expected_stdout)) {
+      return {
+        ok: true,
+        outcome: 'Wrong Answer',
+        ...last,
+        passedCases,
+        totalCases: input.cases.length,
+      }
+    }
+
+    passedCases += 1
+  }
+
+  return { ok: true, outcome: 'Correct', ...last, passedCases, totalCases: input.cases.length }
+}
+
+interface ReferenceValidation {
+  ok: boolean
+  validated?: number
+  total?: number
+  error?: string
+  results?: Array<{
+    case_order: number
+    ok: boolean
+    status_id: number | null
+    stdout_preview: string | null
+    error?: string
+  }>
+}
+
+/**
+ * Reference-validation run for teacher-authored hidden tests. Executes the
+ * faculty reference solution through Judge0 (never locally) once per stdin
+ * and stores each cleanly-succeeded run's normalized stdout as that case's
+ * expected output. Cases whose reference run fails keep expected_stdout NULL
+ * (unvalidated), so the paper gate keeps blocking publication.
+ */
+async function validateReference(
+  cfg: { baseUrl: string; token: string },
+  admin: ReturnType<typeof createClient>,
+  questionId: string,
+): Promise<ReferenceValidation> {
+  const { data: refRows, error: refErr } = await admin.rpc('quizeazz_question_reference', {
+    p_question_id: questionId,
+  })
+  if (refErr) {
+    return { ok: false, error: `reference lookup failed: ${refErr.message}` }
+  }
+  const ref = ((refRows ?? []) as Array<{ reference_solution: string | null; language: string | null }>)[0]
+  if (!ref || !ref.reference_solution || ref.reference_solution.trim() === '') {
+    return { ok: false, error: 'no reference solution stored for this question' }
+  }
+
+  const { data: caseRows, error: casesErr } = await admin.rpc('quizeazz_judge0_test_cases', {
+    p_question_id: questionId,
+  })
+  if (casesErr) {
+    return { ok: false, error: `test case lookup failed: ${casesErr.message}` }
+  }
+  const cases = ((caseRows ?? []) as HiddenTestCase[]).sort((a, b) => a.case_order - b.case_order)
+  if (cases.length === 0) {
+    return { ok: false, error: 'no hidden test cases defined for this question' }
+  }
+
+  const results: NonNullable<ReferenceValidation['results']> = []
+  const outputs: Array<{ case_order: number; expected_stdout: string }> = []
+
+  for (const tc of cases) {
+    const built = buildSubmissionBody({
+      language: 'cpp',
+      sourceCode: ref.reference_solution,
+      stdin: tc.stdin ?? null,
+    })
+    if (!built.ok) {
+      results.push({ case_order: tc.case_order, ok: false, status_id: null, stdout_preview: null, error: built.reason })
+      continue
+    }
+
+    let submissionToken: string
+    try {
+      submissionToken = await submitProgram(cfg, built.body)
+    } catch (err) {
+      results.push({
+        case_order: tc.case_order,
+        ok: false,
+        status_id: null,
+        stdout_preview: null,
+        error: err instanceof Error ? err.message : 'judge0 submission failed',
+      })
+      continue
+    }
+
+    let result: Judge0ResultFields
+    try {
+      result = await pollUntilVerdict(cfg, submissionToken, {
+        attempts: POLL_ATTEMPTS,
+        delayMs: POLL_DELAY_MS,
+      })
+    } catch (err) {
+      results.push({
+        case_order: tc.case_order,
+        ok: false,
+        status_id: null,
+        stdout_preview: null,
+        error: err instanceof Error ? err.message : 'judge0 poll failed',
+      })
+      continue
+    }
+
+    if (result.status_id !== 3) {
+      const mapped = mapJudge0Result(result, SUBMISSION_LIMITS.memory_limit)
+      results.push({
+        case_order: tc.case_order,
+        ok: false,
+        status_id: result.status_id,
+        stdout_preview: (result.stdout ?? '').slice(0, 500),
+        error: `reference did not succeed (mapped: ${mapped.outcome})`,
+      })
+      continue
+    }
+
+    const expected = normalizeProgramOutput(result.stdout)
+    outputs.push({ case_order: tc.case_order, expected_stdout: expected })
+    results.push({
+      case_order: tc.case_order,
+      ok: true,
+      status_id: result.status_id,
+      stdout_preview: expected.slice(0, 500),
+    })
+  }
+
+  if (outputs.length > 0) {
+    const { error: applyErr } = await admin.rpc('quizeazz_apply_reference_outputs', {
+      p_question_id: questionId,
+      p_outputs: outputs,
+    })
+    if (applyErr) {
+      return { ok: false, error: `storing expected outputs failed: ${applyErr.message}`, results }
+    }
+  }
+
+  return { ok: true, validated: outputs.length, total: cases.length, results }
 }
 
 interface VerdictPayload {

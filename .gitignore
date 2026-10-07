@@ -18,6 +18,9 @@ dist/
 # Supabase temporary files
 supabase/.temp/
 
+# Vercel link metadata (project/org IDs for local deploys; never commit)
+.vercel/
+
 # Editor/OS junk
 .DS_Store
 .DS_Store?
@@ -32,3 +35,5 @@ ehthumbs.db
 Temp/
 #Split View
 #tmp
+.vercel
+.env*
