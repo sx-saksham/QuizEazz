@@ -553,7 +553,28 @@ export const ExamTakingScreen: React.FC = () => {
       // through Judge0; the browser holds no Judge0 token and computes no
       // marks. If the request cannot be made the answers simply stay
       // 'Pending Evaluation' - a failure is never recorded as a verdict.
-      void requestProgrammingGrading(supabase, attempt.id).catch(() => undefined)
+      //
+      // The trigger is AWAITED before navigating on purpose. A fire-and-forget
+      // fetch issued in the same tick as a route change can be dropped by the
+      // browser before it is ever sent, which leaves zero Edge Function
+      // invocations and the attempt stuck at 'Pending Evaluation' forever.
+      // Awaiting guarantees the POST has been dispatched (or has observably
+      // failed) before the review page loads. Navigation still always happens:
+      // a trigger failure is logged and never blocks the student.
+      try {
+        const gradeTrigger = await requestProgrammingGrading(supabase, attempt.id)
+        if (!gradeTrigger.ok) {
+          console.warn(
+            '[QuizEazz] programming grading trigger failed:',
+            gradeTrigger.error ?? 'unknown error',
+          )
+        }
+      } catch (err) {
+        console.warn(
+          '[QuizEazz] programming grading trigger threw:',
+          toErrorMessage(err, 'unknown error'),
+        )
+      }
 
       // The attempt is frozen. Leaving fullscreen is now application cleanup,
       // NOT a candidate action, so it must never raise a security event or a

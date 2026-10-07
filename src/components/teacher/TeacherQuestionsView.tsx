@@ -339,10 +339,9 @@ export const TeacherQuestionsView: React.FC = () => {
                   </p>
                   <p className="text-2xs text-amber-900/80 mt-1 leading-relaxed">
                     This question is fully authored and can be assigned to an examination.
-                    Objective code execution is not yet available: no Judge0 CE sandbox is
-                    connected in this deployment. Candidate code will be stored and displayed,
-                    graded as <strong>Pending Evaluation</strong> with zero marks. Marks are
-                    never estimated.
+                    Candidate code is executed in an isolated environment after final
+                    submission and graded as <strong>Pending Evaluation</strong> with zero
+                    marks until a real verdict is produced. Marks are never estimated.
                   </p>
                 </div>
               </div>
