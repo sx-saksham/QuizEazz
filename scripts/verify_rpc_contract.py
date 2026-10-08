@@ -36,6 +36,7 @@ MIGRATION_ORDER = [
     "migration_15_archive_flags.sql",
     "migration_16_results_truth_create_ends_filters.sql",
     "migration_17_sweep_staleness_threshold.sql",
+    "migration_18_realtime_security_log.sql",
 ]
 
 CREATE_RE = re.compile(

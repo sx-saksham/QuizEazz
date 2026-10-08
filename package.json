@@ -11,8 +11,9 @@
     "verify": "python scripts/verify_rpc_contract.py",
     "test:judge0": "python scripts/test_judge0_integration.py",
     "test:exam": "python scripts/test_exam_rules.py",
-    "check": "tsc -b && python scripts/verify_rpc_contract.py && python scripts/test_exam_rules.py && python scripts/test_judge0_integration.py && python scripts/test_class_batch.py && vite build",
-    "test:cohort": "python scripts/test_class_batch.py"
+    "check": "tsc -b && python scripts/verify_rpc_contract.py && python scripts/test_exam_rules.py && python scripts/test_judge0_integration.py && python scripts/test_class_batch.py && python scripts/test_live_updates.py && vite build",
+    "test:cohort": "python scripts/test_class_batch.py",
+    "test:live": "python scripts/test_live_updates.py"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

@@ -1,4 +1,5 @@
 import { supabase, rpcErrorMessage } from './supabase'
+import { notifyExamAvailabilityChanged } from './liveUpdates'
 import type { Exam, Question } from '../types'
 
 // ====================================================================
@@ -302,10 +303,18 @@ export async function setExamArchived(
 export async function publishExamNow(
   examId: string,
 ): Promise<{ exam_id: string; status: string; starts_at: string; ends_at: string; total_questions: number }> {
-  return callRpc(
+  const published = await callRpc<{
+    exam_id: string
+    status: string
+    starts_at: string
+    ends_at: string
+    total_questions: number
+  }>(
     () => supabase.rpc('teacher_publish_now', { p_exam_id: examId }),
     'Unable to publish the examination.',
   )
+  notifyExamAvailabilityChanged()
+  return published
 }
 
 /**
@@ -361,17 +370,19 @@ export async function setExamStatus(
   examId: string,
   status: 'draft' | 'published' | 'closed',
 ): Promise<Exam> {
-  return callRpc<Exam>(
+  const updated = await callRpc<Exam>(
     () => supabase.rpc('teacher_set_exam_status', { p_exam_id: examId, p_status: status }),
     'Unable to update the examination status.',
   )
+  notifyExamAvailabilityChanged()
+  return updated
 }
 
 export async function setExamSchedule(
   examId: string,
   payload: { durationMinutes: number; startsAt: string; endsAt?: string | null },
 ): Promise<Exam> {
-  return callRpc<Exam>(
+  const updated = await callRpc<Exam>(
     () =>
       supabase.rpc('teacher_set_exam_schedule', {
         p_exam_id: examId,
@@ -381,6 +392,8 @@ export async function setExamSchedule(
       }),
     'Unable to update the examination schedule.',
   )
+  notifyExamAvailabilityChanged()
+  return updated
 }
 
 export async function fetchCandidates(): Promise<Candidate[]> {
@@ -435,7 +448,7 @@ export async function setExamAssignments(
   studentIds: string[],
   group?: AssignmentGroup | null,
 ): Promise<{ assigned_count: number; added: number; removed: number }> {
-  return callRpc(
+  const result = await callRpc<{ assigned_count: number; added: number; removed: number }>(
     () =>
       supabase.rpc('teacher_set_exam_assignments', {
         p_exam_id: examId,
@@ -445,6 +458,8 @@ export async function setExamAssignments(
       }),
     'Unable to save the assigned cohort.',
   )
+  notifyExamAvailabilityChanged()
+  return result
 }
 
 export interface HiddenTestCase {

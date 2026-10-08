@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { Button } from '../common/Button'
 import { Badge } from '../common/Badge'
 import { EmptyState } from '../common/EmptyState'
@@ -6,6 +6,7 @@ import { ShieldAlert, AlertCircle } from 'lucide-react'
 import type { SecurityEventRow } from '../../types'
 import { fetchSecurityEvents, clearSecurityLog } from '../../lib/teacherApi'
 import { useAsyncData } from '../../hooks/useAsyncData'
+import { subscribeToSecurityEvents } from '../../lib/liveUpdates'
 import { toErrorMessage } from '../../lib/supabase'
 import { Modal } from '../common/Modal'
 import { NotificationBanner } from '../common/NotificationBanner'
@@ -29,6 +30,16 @@ export const TeacherAnalyticsView: React.FC = () => {
   const [showClear, setShowClear] = useState(false)
   const [clearBusy, setClearBusy] = useState(false)
   const [clearError, setClearError] = useState<string | null>(null)
+
+  // Keep the audit log live. A new proctoring event must appear without a
+  // refresh, and clearing the log must empty the table without one too.
+  //
+  // Both directions just call `reload`, which re-reads through
+  // teacher_get_security_events(). Refetching instead of splicing the realtime
+  // payload into local state is what makes duplicate rows impossible: there is
+  // only ever one source of truth, so an event arriving while a refetch is in
+  // flight cannot be applied twice.
+  useEffect(() => subscribeToSecurityEvents(reload), [reload])
 
   const handleClearLog = async () => {
     if (clearBusy) return

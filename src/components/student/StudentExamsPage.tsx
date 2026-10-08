@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { Clock, Calendar, FileQuestion, ArrowRight, CheckCircle2, Lock, AlertCircle } from 'lucide-react'
 import { fetchMyExams, type CandidateExam } from '../../lib/studentApi'
 import { useAsyncData } from '../../hooks/useAsyncData'
+import { subscribeToExamAvailability } from '../../lib/liveUpdates'
+import { msUntilNextBoundary } from '../../lib/examSchedule'
 
 type CardState = 'upcoming' | 'open' | 'in_progress' | 'completed'
 
@@ -51,6 +53,27 @@ export const StudentExamsPage: React.FC = () => {
     const id = setInterval(() => setNow(Date.now()), 30_000)
     return () => clearInterval(id)
   }, [])
+
+  // A newly assigned or rescheduled exam must appear without the student
+  // pressing F5. The teacher publishes a bare "refetch" signal; the refetch
+  // itself still goes through get_student_exam_overview(), so nothing here
+  // changes what a student is allowed to see.
+  useEffect(() => subscribeToExamAvailability(reload), [reload])
+
+  // Realtime cannot observe a wall-clock instant: no row is written when
+  // starts_at passes, so nothing is emitted at the moment an exam opens. Wake
+  // up exactly at the nearest upcoming boundary and refetch once, instead of
+  // polling the server on an interval.
+  useEffect(() => {
+    const delay = msUntilNextBoundary(exams, now)
+    if (delay === null) return
+    // setTimeout overflows past ~24.8 days, so clamp to a value it can honour.
+    const id = setTimeout(() => {
+      setNow(Date.now())
+      reload()
+    }, Math.min(delay, 2_147_000_000))
+    return () => clearTimeout(id)
+  }, [exams, now, reload])
 
   const fmtDate = (v: string | null) =>
     v
