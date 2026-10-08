@@ -29,6 +29,7 @@ ANALYTICS = SRC / "components" / "teacher" / "TeacherAnalyticsView.tsx"
 TEACHER_API = SRC / "lib" / "teacherApi.ts"
 MIG18 = SQL / "migration_18_realtime_security_log.sql"
 MIG14 = SQL / "migration_14_faculty_clear_security_log.sql"
+MIG19 = SQL / "migration_19_clear_security_events_explicit_where.sql"
 
 PASS, FAIL = [], []
 
@@ -63,6 +64,91 @@ def _run_node(source):
 # ---------------------------------------------------------------------------
 # 1. Clear security log: the destructive RPC contract
 # ---------------------------------------------------------------------------
+def test_clear_log_explicit_where():
+    """
+    Regression for the production failure:
+
+        POST /rest/v1/rpc/teacher_clear_security_events
+        {"code":"21000","message":"DELETE requires a WHERE clause"}
+
+    Migration 14 deleted with no predicate. That statement is valid SQL, but
+    the RPC request path rejected it, so faculty could never clear the audit
+    log. Migration 19 writes the identical deletion as `WHERE true` — a
+    tautology, so the affected rows are unchanged (every row still goes) — and
+    it is only the explicitness the path requires.
+    """
+    mig19 = MIG19.read_text(encoding="utf-8")
+    # Comment lines are documentation and legitimately mention words like
+    # "policy" and "grant" when describing what was NOT changed. Structural
+    # checks therefore run against the executable SQL only.
+    sql = "\n".join(
+        line for line in mig19.splitlines() if not line.lstrip().startswith("--")
+    )
+
+    check(
+        "the DELETE now carries an explicit predicate",
+        re.search(r"DELETE\s+FROM\s+public\.security_events\s+WHERE\s+true", sql, re.I)
+        is not None,
+        "the RPC path rejects a DELETE with no WHERE clause",
+    )
+    check(
+        "no unpredicated DELETE on security_events remains",
+        len(re.findall(r"DELETE\s+FROM\s+public\.security_events", sql, re.I))
+        == len(
+            re.findall(r"DELETE\s+FROM\s+public\.security_events\s+WHERE\s+true", sql, re.I)
+        ),
+    )
+    check(
+        "the deletion is still table-wide (WHERE true, not a narrower filter)",
+        "WHERE exam_id" not in mig19 and "WHERE id" not in mig19,
+        "clear must still remove every audit record, not a subset",
+    )
+    check(
+        "the RPC keeps its name and takes no parameters",
+        re.search(
+            r"CREATE OR REPLACE FUNCTION public\.teacher_clear_security_events\(\s*\)",
+            mig19,
+        )
+        is not None,
+        "a parameterised clear could become an arbitrary-row delete",
+    )
+    check(
+        "the RPC remains SECURITY DEFINER",
+        "SECURITY DEFINER" in mig19,
+    )
+    check(
+        "the faculty guard still runs before the deletion",
+        sql.index("quizeazz_assert_faculty") < sql.index("DELETE FROM"),
+    )
+    check(
+        "search_path stays pinned",
+        "SET search_path = public, pg_temp" in sql,
+    )
+    check(
+        "the return shape is unchanged",
+        "'cleared', TRUE" in sql and "'removed', v_removed" in sql,
+    )
+    check(
+        "migration 19 touches no table, RLS policy, grant or data",
+        re.search(
+            r"\bCREATE\s+TABLE\b|\bALTER\s+TABLE\b|\bDROP\s+TABLE\b|\bCREATE\s+POLICY\b"
+            r"|\bGRANT\b|\bREVOKE\b|\bINSERT\s+INTO\b|\bUPDATE\s+public\b",
+            sql,
+            re.I,
+        )
+        is None,
+        "the fix must be limited to the DELETE statement itself",
+    )
+    check(
+        "migration 19 is idempotent",
+        "CREATE OR REPLACE" in mig19,
+    )
+    check(
+        "no client-side table deletion is introduced",
+        ".delete()" not in (SRC / "lib" / "teacherApi.ts").read_text(encoding="utf-8"),
+    )
+
+
 def test_clear_security_log_contract():
     """teacher_clear_security_events() must stay faculty-only and destructive.
 
@@ -333,6 +419,7 @@ console.log(JSON.stringify(cases));
 
 def main():
     for fn in (
+        test_clear_log_explicit_where,
         test_clear_security_log_contract,
         test_clear_log_frontend_stays_on_the_rpc,
         test_security_log_realtime,

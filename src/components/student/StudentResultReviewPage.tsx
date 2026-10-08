@@ -37,7 +37,7 @@ const outcomeStyle = (outcome: string, marksAwarded: number, marksTotal: number)
   if (outcome === 'Correct') {
     return { cls: 'bg-emerald-50 text-emerald-700', Icon: CheckCircle2 }
   }
-  if (outcome === 'Wrong Answer') {
+  if (outcome === 'Wrong Answer' || outcome === 'Compilation Error') {
     return { cls: 'bg-rose-50 text-rose-700', Icon: XCircle }
   }
   if (outcome === 'Pending Evaluation') {
@@ -48,6 +48,16 @@ const outcomeStyle = (outcome: string, marksAwarded: number, marksTotal: number)
   }
   return { cls: 'bg-slate-100 text-slate-600', Icon: AlertCircle }
 }
+
+/**
+ * Display-only label for the verdict badge.
+ *
+ * A candidate sees a plain pass/fail, so a compilation failure is shown as
+ * "WRONG" rather than as compiler jargon. This is presentation ONLY: the
+ * stored verdict, the grading logic, the marks and every other outcome string
+ * are completely untouched.
+ */
+const outcomeLabel = (outcome: string) => (outcome === 'Compilation Error' ? 'WRONG' : outcome)
 
 export const StudentResultReviewPage: React.FC = () => {
   const { attemptId } = useParams<{ attemptId: string }>()
@@ -252,7 +262,7 @@ export const StudentResultReviewPage: React.FC = () => {
                       className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded ${cls}`}
                     >
                       <Icon className="h-3 w-3" />
-                      <span>{ev.outcome}</span>
+                      <span>{outcomeLabel(ev.outcome)}</span>
                     </span>
                     <span className="text-sm font-bold text-slate-800">
                       {ev.marks_awarded} / {ev.marks_total}

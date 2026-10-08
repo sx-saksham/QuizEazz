@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 
 export interface ModalProps {
@@ -47,8 +48,16 @@ export const Modal: React.FC<ModalProps> = ({
     xl: 'max-w-xl',
   }
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-in fade-in duration-150">
+  // Rendered through a portal on document.body so the overlay is a direct
+  // child of <body>. Inlined in the component tree it was clipped by whatever
+  // ancestor box happened to sit between it and <body>, and `backdrop-filter`
+  // only samples inside its own backdrop root — so the lower part of the page
+  // stayed sharp and un-dimmed while the top looked blurred.
+  //
+  // Nothing else about the modal changes: same overlay, same layout, same
+  // styling, same close behaviour.
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-150">
       <div
         className="fixed inset-0"
         onClick={onClose}
@@ -82,6 +91,7 @@ export const Modal: React.FC<ModalProps> = ({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

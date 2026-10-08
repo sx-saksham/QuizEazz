@@ -12,10 +12,22 @@ import { toErrorMessage } from '../../lib/supabase'
 
 const outcomeBadge = (outcome: string) => {
   if (outcome === 'Correct') return { variant: 'success' as const, Icon: CheckCircle2 }
-  if (outcome === 'Wrong Answer') return { variant: 'danger' as const, Icon: XCircle }
+  if (outcome === 'Wrong Answer' || outcome === 'Compilation Error') {
+    return { variant: 'danger' as const, Icon: XCircle }
+  }
   if (outcome === 'Pending Evaluation') return { variant: 'warning' as const, Icon: Clock3 }
   return { variant: 'neutral' as const, Icon: AlertCircle }
 }
+
+/**
+ * Display-only label for the verdict badge in the Submission Evidence modal.
+ *
+ * A compilation failure is shown as "WRONG" so it reads as a plain pass/fail
+ * here too, matching the candidate's review screen. Presentation ONLY: the
+ * stored verdict, the grading logic, the marks and every other outcome string
+ * are completely untouched.
+ */
+const outcomeLabel = (outcome: string) => (outcome === 'Compilation Error' ? 'WRONG' : outcome)
 
 export const TeacherResultsView: React.FC = () => {
   const [detail, setDetail] = useState<AttemptDetail | null>(null)
@@ -284,7 +296,7 @@ export const TeacherResultsView: React.FC = () => {
                         <div className="flex items-center gap-2 shrink-0">
                           <Badge variant={badge.variant} size="sm">
                             <Icon className="h-3 w-3" />
-                            {item.outcome}
+                            {outcomeLabel(item.outcome)}
                           </Badge>
                           <span className="font-bold text-slate-800">
                             {item.marks_awarded} / {item.marks_total}
