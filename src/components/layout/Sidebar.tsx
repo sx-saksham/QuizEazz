@@ -12,7 +12,13 @@ import {
   ShieldAlert,
 } from 'lucide-react'
 
-export const Sidebar: React.FC = () => {
+export interface SidebarProps {
+  /** Mobile drawer state. The desktop sidebar is unaffected. */
+  mobileOpen?: boolean
+  onMobileClose?: () => void
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onMobileClose }) => {
   const location = useLocation()
   const { profile } = useAuth()
 
@@ -49,7 +55,8 @@ const brandHome = activeRole === 'student' ? '/student/exams' : '/teacher'
   }
 
   return (
-    <aside className="w-56 shrink-0 border-r border-slate-200 bg-white flex flex-col justify-between select-none">
+    <>
+    <aside className="hidden lg:flex w-56 shrink-0 border-r border-slate-200 bg-white flex-col justify-between select-none">
       <div>
         {/* Header Branding */}
         <div className="h-14 px-5 flex items-center border-b border-slate-200">
@@ -93,5 +100,53 @@ const brandHome = activeRole === 'student' ? '/student/exams' : '/teacher'
       </div>
 
     </aside>
+
+    {/* Mobile drawer: same items, no new destinations. */}
+    {mobileOpen && (
+      <div className="lg:hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Navigation">
+        <div className="absolute inset-0 bg-slate-900/50" onClick={onMobileClose} aria-hidden="true" />
+        <aside className="absolute inset-y-0 left-0 w-64 max-w-[80vw] bg-white border-r border-slate-200 flex flex-col select-none overflow-y-auto">
+          <div className="h-14 px-5 flex items-center justify-between border-b border-slate-200 shrink-0">
+            <span className="text-lg font-bold tracking-tight text-slate-900">
+              Quiz<span className="text-indigo-600">Eazz</span>
+            </span>
+            <button
+              onClick={onMobileClose}
+              aria-label="Close navigation"
+              className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-700 min-h-[44px] min-w-[44px] inline-flex items-center justify-center"
+            >
+              <span aria-hidden="true" className="text-lg leading-none">×</span>
+            </button>
+          </div>
+          <nav className="p-3 space-y-1.5">
+            {navigation.map((item) => {
+              const Icon = item.icon
+              const active = isActive(item.href)
+              return (
+                <Link
+                  key={item.name}
+                  to={item.href}
+                  onClick={onMobileClose}
+                  aria-current={active ? 'page' : undefined}
+                  className={`flex items-center gap-3 px-3 py-3 rounded-lg border text-sm font-medium transition-colors ${
+                    active
+                      ? 'bg-indigo-100/70 text-indigo-800 font-semibold border-indigo-300 shadow-2xs'
+                      : 'text-slate-700 border-transparent hover:text-slate-900 hover:bg-slate-100 hover:border-slate-200'
+                  }`}
+                >
+                  <Icon
+                    className={`h-5 w-5 shrink-0 transition-colors ${
+                      active ? 'text-indigo-600' : 'text-slate-400'
+                    }`}
+                  />
+                  <span>{item.name}</span>
+                </Link>
+              )
+            })}
+          </nav>
+        </aside>
+      </div>
+    )}
+    </>
   )
 }

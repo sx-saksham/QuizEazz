@@ -97,7 +97,7 @@ export const AuthForm: React.FC<AuthFormProps> = ({ initialMode = 'login' }) => 
   }
 
   return (
-    <div className="min-h-screen bg-slate-50/80 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-slate-50/80 flex flex-col justify-center py-6 sm:py-12 sm:px-6 lg:px-8">
       {/* QuizEazz Header */}
       <div className="sm:mx-auto sm:w-full sm:max-w-md text-center">
         <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-tr from-indigo-600 via-indigo-700 to-purple-600 text-white shadow-sm ring-4 ring-indigo-50/80">
@@ -169,7 +169,6 @@ export const AuthForm: React.FC<AuthFormProps> = ({ initialMode = 'login' }) => 
                   type="text"
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
-                  placeholder="e.g. Alex Morgan"
                   leftIcon={<User className="h-4 w-4" />}
                   required
                 />

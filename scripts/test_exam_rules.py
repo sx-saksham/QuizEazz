@@ -841,6 +841,106 @@ def test_phase_e_corrections():
     )
 
 
+def test_mobile_responsive_layout():
+    """Responsive shell: sidebar collapses to a drawer, exam navigator has
+    a mobile strip, timer/submit stay visible, desktop layout unchanged."""
+    sb = _src("components/layout/Sidebar.tsx")
+    check(
+        "desktop sidebar hidden below lg",
+        "hidden lg:flex" in sb,
+    )
+    check(
+        "mobile drawer reuses the same navigation items",
+        "lg:hidden fixed inset-0" in sb and "Close navigation" in sb,
+    )
+    nav = _src("components/layout/Navbar.tsx")
+    check(
+        "navbar exposes a mobile menu trigger",
+        "Open navigation" in nav and "lg:hidden" in nav,
+    )
+    lay = _src("components/layout/DashboardLayout.tsx")
+    check(
+        "layout wires the mobile drawer state",
+        "mobileNavOpen" in lay,
+    )
+    check(
+        "content padding adapts to narrow screens",
+        "p-4 sm:p-6 lg:p-8" in lay,
+    )
+    ex = _src("components/student/ExamTakingScreen.tsx")
+    check(
+        "desktop question rail hidden on mobile",
+        "hidden md:flex w-64" in ex,
+    )
+    check(
+        "mobile question strip exists with tap targets",
+        "md:hidden" in ex and "h-10 w-10" in ex,
+    )
+    check(
+        "exam header wraps instead of overflowing",
+        "flex-wrap" in ex,
+    )
+    check(
+        "exam timer logic untouched (deadline ref + interval intact)",
+        "deadlineRef.current - Date.now()" in ex,
+    )
+    check(
+        "submit flush ordering intact after responsive edits",
+        ex.index("await flushPendingSave()") < ex.index("submittingRef.current = true"),
+    )
+    mo = _src("components/common/Modal.tsx")
+    check("modal footers wrap on narrow screens", "flex-wrap" in mo)
+    check(
+        "viewport meta enables mobile layout",
+        "width=device-width" in (ROOT / "index.html").read_text(encoding="utf-8"),
+    )
+
+
+def test_submit_flush_ordering():
+    """Autosave/submit race: the pre-submit flush must run BEFORE the
+    submission lock (the lock refuses flushes). Covers manual submit,
+    timer-expiry submit, double-submit, in-flight saves, and server
+    deadline authority."""
+    txt = _src("components/student/ExamTakingScreen.tsx")
+    body = txt[txt.index("const performSubmit"):]
+    first_flush = body.index("await flushPendingSave()")
+    lock = body.index("submittingRef.current = true")
+    check(
+        "A/B/C: pre-submit flush runs before the submission lock",
+        first_flush < lock,
+    )
+    check(
+        "D: lock is re-checked after the flush await (double-submit loser returns)",
+        body.index("if (!attempt || submittingRef.current) return", first_flush) < lock,
+    )
+    check(
+        "E: post-lock drain flushes keystrokes typed during the flush await",
+        "await flushPendingSave(true)" in body
+        and body.index("await flushPendingSave(true)") > lock,
+    )
+    check(
+        "flush still refuses once locked for the debounce timer path",
+        "(!ignoreLock && submittingRef.current)" in txt,
+    )
+    check(
+        "C: timer expiry shares the corrected submit path",
+        "if (isTimeExpired && attempt && !submittingRef.current) void performSubmit()" in txt,
+    )
+    check(
+        "F: server remains authoritative over the deadline",
+        "save_exam_answer" in _src("lib/examEngine.ts")
+        and "submit_exam_attempt" in _src("lib/examEngine.ts"),
+    )
+    check(
+        "G: refresh/reopen path untouched (deadline-derived immediate expiry)",
+        "Reopened after the deadline" in txt,
+    )
+    check(
+        "no new edits after lock (handlers still guard on submittingRef)",
+        txt.count("submittingRef.current) return") >= 3,
+    )
+
+
 def test_review_status_authority():
     """One lifecycle everywhere: attempt status alone decides.
     Covers the QUIZ5 contradiction (list said in-progress while review
@@ -983,6 +1083,8 @@ def main():
         test_registry_layout_and_archive_api,
         test_phase_e_corrections,
         test_review_status_authority,
+        test_submit_flush_ordering,
+        test_mobile_responsive_layout,
     ]:
         fn()
 

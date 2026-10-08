@@ -271,13 +271,17 @@ export const ExamTakingScreen: React.FC = () => {
   // ---------------------------------------------------------------
   // 3. Autosave
   // ---------------------------------------------------------------
-  const flushPendingSave = useCallback(async () => {
+  const flushPendingSave = useCallback(async (ignoreLock = false) => {
     if (debounceRef.current) {
       clearTimeout(debounceRef.current)
       debounceRef.current = null
     }
     const pending = pendingRef.current
-    if (!pending || !attempt || isPaused || submittingRef.current) return
+    // The submission lock refuses flushes, so the submit path must flush
+    // BEFORE locking (and re-drain after locking, see performSubmit).
+    // The debounce timer always calls with the default: once submission has
+    // begun, nothing more may be written.
+    if (!pending || !attempt || isPaused || (!ignoreLock && submittingRef.current)) return
 
     pendingRef.current = null
     setSaveState('saving')
@@ -558,13 +562,26 @@ export const ExamTakingScreen: React.FC = () => {
   const performSubmit = useCallback(async () => {
     if (!attempt || submittingRef.current) return
 
+    // Flush FIRST, before the lock: a flush refuses to run once the lock is
+    // set, so locking first would silently discard any keystroke still inside
+    // the autosave debounce window. This covers both manual Submit and the
+    // timer-expiry path, which share this function.
+    await flushPendingSave()
+
+    // A concurrent submit may have taken the lock during the flush await.
+    // Single-flight is preserved: the loser returns without submitting.
+    if (!attempt || submittingRef.current) return
+
     submittingRef.current = true
     setIsSubmitting(true)
     setSubmitError(null)
 
     try {
-      // Flush any pending keystroke before freezing the attempt.
-      await flushPendingSave()
+      // Drain anything typed during the flush await. Edit handlers are now
+      // blocked by the lock, so pendingRef is stable: after this drain it is
+      // guaranteed empty and stays empty. A rejected drain never blocks the
+      // submit itself — the server remains authoritative over the deadline.
+      await flushPendingSave(true)
 
       const result = await submitExamAttempt(attempt.id)
 
@@ -820,17 +837,17 @@ export const ExamTakingScreen: React.FC = () => {
       onCut={handleClipboardGuard('cut')}
       onPaste={handleClipboardGuard('paste')}
     >
-      {/* TOP BAR */}
-      <header className="h-14 w-full border-b border-slate-200 bg-white px-6 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
-          <span className="text-base font-bold text-slate-900 tracking-tight shrink-0">
+      {/* TOP BAR — timer and submit stay visible at every width. */}
+      <header className="w-full border-b border-slate-200 bg-white px-3 sm:px-6 py-2 flex items-center justify-between gap-2 flex-wrap shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <span className="hidden min-[420px]:inline text-base font-bold text-slate-900 tracking-tight shrink-0">
             Quiz<span className="text-indigo-600">Eazz</span>
           </span>
-          <span className="text-slate-300 shrink-0">|</span>
-          <h1 className="text-sm font-semibold text-slate-700 truncate">{examTitle}</h1>
+          <span className="hidden min-[420px]:inline text-slate-300 shrink-0">|</span>
+          <h1 className="text-xs sm:text-sm font-semibold text-slate-700 truncate">{examTitle}</h1>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 sm:gap-4 shrink-0">
           {/* Honest autosave indicator */}
           <div className="hidden sm:flex items-center gap-1.5 text-xs">
             <span
@@ -890,16 +907,40 @@ export const ExamTakingScreen: React.FC = () => {
               setSubmitError(null)
               setShowSubmitModal(true)
             }}
-            className="px-4 py-1.5 rounded-lg text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
+            className="px-4 py-2 sm:py-1.5 rounded-lg text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors min-h-[44px] sm:min-h-0"
           >
             Submit Exam
           </button>
         </div>
       </header>
 
-      <div className="flex-1 flex min-h-0 overflow-hidden">
-        {/* NAVIGATOR */}
-        <aside className="w-64 border-r border-slate-200 bg-white flex flex-col justify-between shrink-0">
+      <div className="flex-1 flex flex-col md:flex-row min-h-0 min-w-0 overflow-hidden">
+        {/* MOBILE NAVIGATOR — horizontal strip, same state as the desktop rail. */}
+        <div className="md:hidden shrink-0 border-b border-slate-200 bg-white px-3 py-2 flex items-center gap-2 overflow-x-auto custom-scrollbar">
+          <span className="text-2xs font-bold uppercase tracking-wider text-slate-400 shrink-0">
+            {answeredCount}/{questions.length}
+          </span>
+          {questions.map((q, idx) => {
+            let cls = 'border-slate-200 bg-white text-slate-700'
+            if (answers[q.id]?.trim()) cls = 'bg-emerald-600 text-white border-emerald-600 font-bold'
+            if (markedForReview[q.id]) cls = 'bg-amber-500 text-white border-amber-500 font-bold'
+            if (idx === currentIndex) cls += ' ring-2 ring-indigo-600 ring-offset-1 border-indigo-600'
+            return (
+              <button
+                key={q.id}
+                onClick={() => setCurrentIndex(idx)}
+                aria-label={`Go to question ${idx + 1}`}
+                aria-current={idx === currentIndex}
+                className={`h-10 w-10 shrink-0 rounded-lg border text-sm font-medium flex items-center justify-center transition-all ${cls}`}
+              >
+                {idx + 1}
+              </button>
+            )
+          })}
+        </div>
+
+        {/* NAVIGATOR — fixed rail on desktop */}
+        <aside className="hidden md:flex w-64 border-r border-slate-200 bg-white flex-col justify-between shrink-0">
           <div className="p-4 space-y-4 overflow-y-auto custom-scrollbar">
             <div>
               <div className="flex items-center justify-between text-sm font-bold text-slate-800 mb-1">
@@ -966,8 +1007,8 @@ export const ExamTakingScreen: React.FC = () => {
         </aside>
 
         {/* WORKSPACE */}
-        <main className="flex-1 flex flex-col justify-between overflow-y-auto custom-scrollbar p-6 bg-slate-50">
-          <div className="max-w-4xl mx-auto w-full space-y-4">
+        <main className="flex-1 flex flex-col justify-between overflow-y-auto custom-scrollbar p-3 sm:p-6 bg-slate-50 min-w-0">
+          <div className="max-w-4xl mx-auto w-full min-w-0 space-y-4">
             <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs space-y-3">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100 flex-wrap gap-2">
                 <div className="flex items-center gap-2">
@@ -1099,7 +1140,7 @@ export const ExamTakingScreen: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-300 overflow-hidden bg-[#1e1e1e]">
+                <div className="rounded-xl border border-slate-300 overflow-hidden bg-[#1e1e1e] min-w-0 max-w-full">
                   <Editor
                     height="380px"
                     language="cpp"

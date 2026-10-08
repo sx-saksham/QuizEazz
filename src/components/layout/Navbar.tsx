@@ -1,9 +1,9 @@
 import React from 'react'
 import { Link } from 'react-router-dom'
-import { LogOut } from 'lucide-react'
+import { LogOut, Menu } from 'lucide-react'
 import { useAuth } from '../../context/AuthContext'
 
-export const Navbar: React.FC = () => {
+export const Navbar: React.FC<{ onMenuClick?: () => void }> = ({ onMenuClick }) => {
   const { profile, user, signOut } = useAuth()
 
   const displayName = profile?.full_name || user?.email?.split('@')[0] || 'Candidate'
@@ -25,8 +25,18 @@ export const Navbar: React.FC = () => {
     profile?.role === 'teacher' || profile?.role === 'admin' ? '/teacher' : '/student/exams'
 
   return (
-    <header className="h-14 w-full border-b border-slate-200 bg-white px-6 flex items-center justify-between shrink-0">
+    <header className="h-14 w-full border-b border-slate-200 bg-white px-3 sm:px-6 flex items-center justify-between shrink-0 gap-2">
       {/* Brand Title */}
+      <div className="flex items-center gap-1 min-w-0">
+        {onMenuClick && (
+          <button
+            onClick={onMenuClick}
+            aria-label="Open navigation"
+            className="lg:hidden rounded-lg p-2 text-slate-600 hover:bg-slate-100 hover:text-slate-900 min-h-[44px] min-w-[44px] inline-flex items-center justify-center shrink-0"
+          >
+            <Menu className="h-5 w-5" />
+          </button>
+        )}
       <Link
         to={homeRoute}
         className="flex items-center gap-2 hover:opacity-85 transition-opacity"
@@ -35,11 +45,12 @@ export const Navbar: React.FC = () => {
         <span className="text-base font-bold text-slate-900 tracking-tight">
           Quiz<span className="text-indigo-600">Eazz</span>
         </span>
-        <span className="text-slate-300 text-sm font-light">|</span>
-        <span className="text-xs font-medium text-slate-500">
+        <span className="text-slate-300 text-sm font-light hidden min-[400px]:inline">|</span>
+        <span className="text-xs font-medium text-slate-500 hidden min-[400px]:inline">
           Examination Portal
         </span>
       </Link>
+      </div>
 
       {/* Right Controls - Minimal Profile & Sign Out */}
       <div className="flex items-center gap-4">
