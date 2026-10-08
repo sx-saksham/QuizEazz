@@ -10,6 +10,10 @@ import {
   Hourglass,
 } from 'lucide-react'
 import { fetchAttemptReview, type ReviewReport } from '../../lib/studentApi'
+import {
+  attemptEvaluationState,
+  ATTEMPT_EVALUATION_LABEL,
+} from '../../lib/attemptStatus'
 import { useAsyncData } from '../../hooks/useAsyncData'
 import { languageLabel } from '../../lib/languages'
 
@@ -45,24 +49,6 @@ const outcomeStyle = (outcome: string, marksAwarded: number, marksTotal: number)
   return { cls: 'bg-slate-100 text-slate-600', Icon: AlertCircle }
 }
 
-/** Human label for the attempt lifecycle value held by the database. */
-const lifecycleLabel = (status: string): string => {
-  switch (status) {
-    case 'submitted':
-      return 'Submitted'
-    case 'timed_out':
-      return 'Time Expired — Submitted'
-    case 'evaluating':
-      return 'Submitted — Evaluating'
-    case 'evaluated':
-      return 'Submitted — Objective Grading Complete'
-    case 'in_progress':
-      return 'In Progress'
-    default:
-      return status.replace(/_/g, ' ')
-  }
-}
-
 export const StudentResultReviewPage: React.FC = () => {
   const { attemptId } = useParams<{ attemptId: string }>()
   const navigate = useNavigate()
@@ -85,8 +71,12 @@ export const StudentResultReviewPage: React.FC = () => {
     // Nothing to wait for until the first report has arrived.
     if (!report) return
 
-    // Only poll while a programming answer is genuinely unresolved. A report
-    // that is already complete is never polled.
+    // Attempt-level state is authoritative: a finalized report is never
+    // polled, however stale individual answer outcomes look. Only a live
+    // evaluation still in progress may refetch.
+    if (attemptEvaluationState(report.status) !== 'evaluating') return
+
+    // Only poll while a programming answer is genuinely unresolved.
     const pendingProgramming = report.evaluations.some(
       (e) => e.question_type === 'coding' && !CONCLUSIVE.has(e.outcome),
     )
@@ -131,27 +121,20 @@ export const StudentResultReviewPage: React.FC = () => {
     report.total_marks > 0 ? Math.round((report.score / report.total_marks) * 100) : 0
 
   // ---------------------------------------------------------------
-  // Status ladder — three DISTINCT facts, never collapsed into one.
-  //
-  // Every value below comes from the server's per-question `outcome`.
-  // Nothing is inferred from the code, the score, or the attempt status.
+  // Attempt-level state is authoritative (shared helper, same as the
+  // results list): exam_attempts.status alone decides. Per-question
+  // outcomes below remain visible as evidence, but they can never flip
+  // this page-level state — an `evaluated` attempt is final even when a
+  // legacy answer row still carries a stale pending outcome.
   // ---------------------------------------------------------------
-
-  // 1. EVALUATION status: does a real verdict exist for EVERY question?
-  const pendingEvaluations = report.evaluations.filter(
-    (e) => !CONCLUSIVE.has(e.outcome),
-  )
-  const pendingCoding = pendingEvaluations.filter((e) => e.question_type === 'coding')
-  const hasPending = pendingCoding.length > 0 || pendingEvaluations.length > 0
-
-  // 2. SCORE status: a score over a paper that still has ungraded questions
-  //    is provisional, and must be labelled as such.
-  const scoreIsFinal = !hasPending
-
-  const evaluationLabel = hasPending ? 'Evaluation Pending' : 'Evaluated'
-  const evaluationBadge = hasPending
-    ? 'bg-amber-50 text-amber-800 border-amber-200'
-    : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+  const evalState = attemptEvaluationState(report.status)
+  const evaluationLabel = ATTEMPT_EVALUATION_LABEL[evalState]
+  const evaluationBadge =
+    evalState === 'evaluated'
+      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+      : evalState === 'in_progress'
+      ? 'bg-blue-50 text-blue-700 border-blue-200'
+      : 'bg-amber-50 text-amber-800 border-amber-200'
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
@@ -182,84 +165,63 @@ export const StudentResultReviewPage: React.FC = () => {
               <span className="text-sm font-semibold text-indigo-600">({percentage}%)</span>
             </div>
             <p className="text-xs text-slate-500 mt-1">
-              {scoreIsFinal
+              {evalState === 'evaluated'
                 ? 'Final score across every question in this paper.'
-                : 'Provisional. These are the marks awarded so far; the questions below marked “Pending Evaluation” carry no marks yet and will change this total.'}
+                : 'Your score will be final once evaluation is complete.'}
             </p>
           </div>
 
           <span
             className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-semibold border ${evaluationBadge}`}
           >
-            {hasPending ? (
-              <Hourglass className="h-4 w-4" />
-            ) : (
+            {evalState === 'evaluated' ? (
               <CheckCircle2 className="h-4 w-4" />
+            ) : (
+              <Hourglass className="h-4 w-4" />
             )}
             {evaluationLabel}
           </span>
         </div>
 
-        <dl className="grid gap-2.5 sm:grid-cols-2 border-t border-slate-100 pt-4">
-          <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-            <dt className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-              1 · Submission
-            </dt>
-            <dd className="text-xs text-slate-700 mt-0.5">
-              {lifecycleLabel(report.status)} ·{' '}
-              {new Date(report.submitted_at).toLocaleString()}
-              <span className="block text-slate-500">
-                Your paper is frozen. Nothing further can be changed.
-              </span>
-            </dd>
-          </div>
-
-          <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-            <dt className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-              2 · Evaluation
-            </dt>
-            <dd className="text-xs text-slate-700 mt-0.5">
-              {hasPending ? (
-                <>
-                  {pendingCoding.length} programming question
-                  {pendingCoding.length === 1 ? '' : 's'} awaiting isolated code
-                  execution. {report.evaluations.length - pendingEvaluations.length} of{' '}
-                  {report.evaluations.length} question
-                  {report.evaluations.length === 1 ? ' has' : 's have'} a confirmed verdict.
-                </>
-              ) : (
-                <>
-                  Complete. All {report.evaluations.length} question
-                  {report.evaluations.length === 1 ? ' has' : 's have'} a confirmed objective
-                  verdict.
-                </>
-              )}
-            </dd>
-          </div>
-        </dl>
+        <p className="text-xs text-slate-500 border-t border-slate-100 pt-3">
+          {evalState === 'evaluated'
+            ? 'Final score across every question in this paper.'
+            : evalState === 'evaluating'
+            ? 'Your score will be final once evaluation is complete.'
+            : 'This examination has not been submitted yet.'}
+        </p>
+        <p className="text-xs text-slate-500">
+          Submitted work cannot be changed after submission.
+        </p>
       </div>
 
-      {hasPending && (
+      {evalState === 'evaluating' && (
         <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 text-xs text-amber-900 flex items-start gap-2.5">
           <Clock3 className="h-4 w-4 shrink-0 mt-0.5" />
           <div>
-            <p className="font-semibold">Some programming questions are awaiting evaluation</p>
+            <p className="font-semibold">Evaluation in progress</p>
             <p className="mt-0.5 leading-relaxed">
-              Your programming answers are being evaluated now, in an isolated environment that runs
-              each submission on its own. This page updates on its own once the evaluation is
-              complete, so there is nothing you need to do. Until a result is confirmed, no marks
-              have been awarded or estimated for these questions.
+              Your answer has been submitted successfully. Your result will appear here once
+              evaluation is complete.
             </p>
           </div>
         </div>
       )}
 
-      {report.evaluations.length === 0 ? (
-        <div className="rounded-xl border border-slate-200 bg-white p-10 text-center">
-          <p className="text-xs text-slate-500">
-            Evaluation has not been completed for this attempt yet.
-          </p>
+      {evalState === 'in_progress' && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5 text-xs text-blue-900">
+          This examination is still in progress. Return to your exams to continue.
         </div>
+      )}
+
+      {report.evaluations.length === 0 ? (
+        evalState === 'evaluated' ? (
+          <div className="rounded-xl border border-slate-200 bg-white p-10 text-center">
+            <p className="text-xs text-slate-500">
+              Your final result has been recorded.
+            </p>
+          </div>
+        ) : null
       ) : (
         <div className="space-y-4">
           <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">
@@ -354,18 +316,13 @@ export const StudentResultReviewPage: React.FC = () => {
                       </pre>
                     </div>
 
-                    {!CONCLUSIVE.has(ev.outcome) && (
+                    {/* Answer-level evidence only: shown while evaluation is
+                        genuinely unfinished, never on a final attempt. */}
+                    {evalState !== 'evaluated' && !CONCLUSIVE.has(ev.outcome) && (
                       <p className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
-                        Awaiting evaluation in the isolated execution environment. No marks are
-                        awarded and no correctness is inferred until a real verdict is produced.
+                        Evaluation in progress.
                       </p>
                     )}
-                  </div>
-                )}
-
-                {ev.explanation && (
-                  <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-700 leading-relaxed">
-                    <strong className="text-slate-900">Explanation:</strong> {ev.explanation}
                   </div>
                 )}
               </div>

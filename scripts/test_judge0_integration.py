@@ -387,6 +387,123 @@ def normalize_program_output(text):
     return stripped.rstrip("\n")
 
 
+def _ui_text(path):
+    """Component source with comments stripped, so assertions target rendered
+    copy rather than developer comments."""
+    txt = (SRC / path).read_text(encoding="utf-8")
+    txt = re.sub(r"\{\/\*.*?\*\/\}", "", txt, flags=re.S)
+    txt = re.sub(r"/\*.*?\*/", "", txt, flags=re.S)
+    txt = re.sub(r"(?m)^\s*//.*$", "", txt)
+    return txt
+
+
+def test_ui_cleanup_phase_e():
+    student_files = [
+        "components/student/StudentResultsPage.tsx",
+        "components/student/StudentResultReviewPage.tsx",
+        "components/student/StudentGuidelinesPage.tsx",
+        "components/student/ExamTakingScreen.tsx",
+    ]
+    teacher_files = [
+        "components/teacher/TeacherQuestionsView.tsx",
+        "components/teacher/TeacherResultsView.tsx",
+        "components/teacher/CreateQuestionModal.tsx",
+        "components/teacher/ManageTestsModal.tsx",
+    ]
+    for rel in student_files + teacher_files:
+        txt = _ui_text(rel)
+        check(
+            f"no Judge0 brand in rendered UI ({rel.split('/')[-1]})",
+            "Judge0" not in txt,
+            "implementation brand must not reach users",
+        )
+        check(
+            f"no sandbox/disconnected claims in rendered UI ({rel.split('/')[-1]})",
+            "sandbox" not in txt.lower() and "not connected" not in txt,
+            "stale connectivity claims must not reach users",
+        )
+        check(
+            f"no 'Code judging pending' in rendered UI ({rel.split('/')[-1]})",
+            "Code judging pending" not in txt,
+        )
+        check(
+            f"no 'Programming evaluation status' box in ({rel.split('/')[-1]})",
+            "Programming evaluation status" not in txt,
+        )
+
+    check(
+        "guidelines capability disclaimer is gone",
+        "What this platform can and cannot do" not in (SRC / "components" / "student" / "StudentGuidelinesPage.tsx").read_text(encoding="utf-8"),
+    )
+    review = _ui_text("components/student/StudentResultReviewPage.tsx")
+    check(
+        "review has no Submission/Evaluation ladder cards",
+        "1 · Submission" not in review and "2 · Evaluation" not in review,
+    )
+    check(
+        "review has no awaiting-evaluation banner copy",
+        "Some programming questions are awaiting evaluation" not in review,
+    )
+    check(
+        "review pending state uses the simple prescribed wording",
+        "Evaluation in progress" in review
+        and "Your answer has been submitted successfully" in review,
+    )
+    check(
+        "review keeps the essential result elements",
+        ("Evaluated" in review or "ATTEMPT_EVALUATION_LABEL" in review)
+        and "marks_awarded" in review
+        and "student_code" in review,
+    )
+    modal = (SRC / "components" / "teacher" / "CreateQuestionModal.tsx").read_text(encoding="utf-8")
+    check(
+        "question form has no Category/Subcategory inputs",
+        "Subcategory / Topic" not in modal and '"Category"' not in modal and "'Category'" not in modal,
+    )
+    check(
+        "question form has no Notes/Rubric/Explanation field",
+        "Internal Faculty Notes" not in modal and "setExplanation" not in modal,
+    )
+    check(
+        "review and bank inspect show no Explanation block",
+        "Explanation:" not in _ui_text("components/student/StudentResultReviewPage.tsx")
+        and "Faculty Notes / Rubric" not in _ui_text("components/teacher/TeacherQuestionsView.tsx"),
+    )
+    css = (SRC / "index.css").read_text(encoding="utf-8")
+    check(
+        "readability floor is 12px (text-2xs)",
+        re.search(r"font-size:\s*0\.75rem", css) is not None,
+    )
+    check(
+        "no sub-12px arbitrary text sizes remain in src",
+        not re.search(r"text-\[(9|10|11)px\]", "".join(
+            p.read_text(encoding="utf-8", errors="replace")
+            for p in list(SRC.rglob("*.tsx")) + list(SRC.rglob("*.ts")))),
+    )
+    check(
+        "no window.location.reload anywhere (refetch architecture only)",
+        not any(
+            "window.location.reload" in p.read_text(encoding="utf-8", errors="replace")
+            for p in list(SRC.rglob("*.ts")) + list(SRC.rglob("*.tsx"))),
+    )
+    for rel, fn in [
+        ("components/admin/AdminDashboard.tsx", "reload"),
+        ("components/teacher/TeacherStudentsView.tsx", "reload"),
+        ("components/student/StudentExamsPage.tsx", "reload"),
+        ("components/student/StudentResultsPage.tsx", "reload"),
+        ("components/teacher/TeacherQuestionsView.tsx", "reload"),
+        ("components/teacher/TeacherResultsView.tsx", "reload"),
+        ("components/teacher/TeacherExamsView.tsx", "reloadExams"),
+        ("components/teacher/TeacherOverview.tsx", "reload"),
+        ("components/teacher/TeacherAnalyticsView.tsx", "reload"),
+    ]:
+        txt = (SRC / rel).read_text(encoding="utf-8")
+        check(
+            f"Refresh refetches data on {rel.split('/')[-1]}",
+            f"onClick={{{fn}}}" in txt,
+        )
+
+
 def test_hidden_test_storage():
     check("migration 11 exists", MIG11.exists())
     if not MIG11.exists():
@@ -892,8 +1009,8 @@ def test_no_false_judge0_disconnected_claim():
 
     check(
         "the pending banner does not claim evaluation succeeded",
-        re.search(r"hasPending\s*\?\s*'Evaluation Pending'\s*:\s*'Evaluated'", txt) is not None,
-        "the label must stay driven by the server report",
+        re.search(r"ATTEMPT_EVALUATION_LABEL\s*\[\s*evalState\s*\]", txt) is not None,
+        "the label must stay driven by the authoritative attempt status",
     )
 
 
@@ -1147,6 +1264,7 @@ def main():
         test_verdict_application,
         test_snapshot_integrity,
         test_edit_rpcs_and_ui,
+        test_ui_cleanup_phase_e,
         test_hidden_test_storage,
         test_normalization_semantics,
         test_harness_semantics,

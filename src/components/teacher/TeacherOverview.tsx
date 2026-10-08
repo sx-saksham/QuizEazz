@@ -10,7 +10,6 @@ import {
   Users,
   Award,
   Plus,
-  RefreshCw,
   ShieldAlert,
   ArrowRight,
   AlertCircle,
@@ -49,7 +48,7 @@ const EMPTY_OVERVIEW = {
 export const TeacherOverview: React.FC = () => {
   // RPC-only. A failure is reported rather than masked with fallback data.
   const loadStats = useCallback(() => fetchOverviewStats(), [])
-  const { data: overview, error, loading, reload } = useAsyncData(loadStats, EMPTY_OVERVIEW, {
+  const { data: overview, error, reload } = useAsyncData(loadStats, EMPTY_OVERVIEW, {
     errorFallback: 'Unable to load dashboard statistics.',
   })
 
@@ -82,15 +81,6 @@ export const TeacherOverview: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              icon={<RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />}
-              onClick={reload}
-              disabled={loading}
-            >
-              Refresh
-            </Button>
             <Link to="/teacher/exams">
               <Button variant="primary" size="sm" icon={<Plus className="h-3.5 w-3.5" />}>
                 Schedule Exam
@@ -101,9 +91,9 @@ export const TeacherOverview: React.FC = () => {
 
         {/* Stats Grid */}
         <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div className="rounded-lg border border-slate-100 bg-slate-50/70 p-4 flex flex-col gap-2">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 flex flex-col gap-2 shadow-sm">
             <div className="flex items-center justify-between">
-              <span className="text-2xs font-semibold uppercase tracking-wider text-slate-400">
+              <span className="text-2xs font-semibold uppercase tracking-wider text-slate-500">
                 Question Bank
               </span>
               <Database className="h-4 w-4 shrink-0 text-blue-600" />
@@ -112,9 +102,9 @@ export const TeacherOverview: React.FC = () => {
             <p className="text-2xs text-slate-500 leading-normal">Verified questions in repository</p>
           </div>
 
-          <div className="rounded-lg border border-slate-100 bg-slate-50/70 p-4 flex flex-col gap-2">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 flex flex-col gap-2 shadow-sm">
             <div className="flex items-center justify-between">
-              <span className="text-2xs font-semibold uppercase tracking-wider text-slate-400">
+              <span className="text-2xs font-semibold uppercase tracking-wider text-slate-500">
                 Examinations
               </span>
               <FileSpreadsheet className="h-4 w-4 shrink-0 text-indigo-600" />
@@ -123,9 +113,9 @@ export const TeacherOverview: React.FC = () => {
             <p className="text-2xs text-slate-500 leading-normal">{stats.activeExams} active or scheduled</p>
           </div>
 
-          <div className="rounded-lg border border-slate-100 bg-slate-50/70 p-4 flex flex-col gap-2">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 flex flex-col gap-2 shadow-sm">
             <div className="flex items-center justify-between">
-              <span className="text-2xs font-semibold uppercase tracking-wider text-slate-400">
+              <span className="text-2xs font-semibold uppercase tracking-wider text-slate-500">
                 Registered Students
               </span>
               <Users className="h-4 w-4 shrink-0 text-emerald-600" />
@@ -134,9 +124,9 @@ export const TeacherOverview: React.FC = () => {
             <p className="text-2xs text-slate-500 leading-normal">Candidate roll profiles</p>
           </div>
 
-          <div className="rounded-lg border border-slate-100 bg-slate-50/70 p-4 flex flex-col gap-2">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 flex flex-col gap-2 shadow-sm">
             <div className="flex items-center justify-between">
-              <span className="text-2xs font-semibold uppercase tracking-wider text-slate-400">
+              <span className="text-2xs font-semibold uppercase tracking-wider text-slate-500">
                 Submissions
               </span>
               <Award className="h-4 w-4 shrink-0 text-purple-600" />
@@ -147,7 +137,16 @@ export const TeacherOverview: React.FC = () => {
         </div>
       </div>
 
-      {error && <NotificationBanner type="error" message={error} onClose={reload} />}
+      {error && (
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="flex-1">
+            <NotificationBanner type="error" message={error} onClose={reload} />
+          </div>
+          <Button variant="outline" size="sm" onClick={reload}>
+            Try Again
+          </Button>
+        </div>
+      )}
 
       {/* Two Column Layout */}
       <div className="grid gap-6 lg:grid-cols-3">
@@ -222,7 +221,7 @@ export const TeacherOverview: React.FC = () => {
             <CardContent className="space-y-2.5 p-4 pt-0">
               <Link
                 to="/teacher/questions"
-                className="group flex items-center gap-3 p-3 rounded-lg border border-slate-100 bg-slate-50/60 hover:bg-indigo-50/60 hover:border-indigo-100 transition-colors"
+                className="group flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-white shadow-2xs hover:bg-indigo-50/60 hover:border-indigo-200 transition-colors"
               >
                 <Database className="h-5 w-5 shrink-0 text-blue-600 group-hover:text-indigo-600 transition-colors" />
                 <div className="min-w-0 flex-1">
@@ -238,7 +237,7 @@ export const TeacherOverview: React.FC = () => {
 
               <Link
                 to="/teacher/exams"
-                className="group flex items-center gap-3 p-3 rounded-lg border border-slate-100 bg-slate-50/60 hover:bg-indigo-50/60 hover:border-indigo-100 transition-colors"
+                className="group flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-white shadow-2xs hover:bg-indigo-50/60 hover:border-indigo-200 transition-colors"
               >
                 <FileSpreadsheet className="h-5 w-5 shrink-0 text-indigo-600 group-hover:text-indigo-600 transition-colors" />
                 <div className="min-w-0 flex-1">
@@ -254,7 +253,7 @@ export const TeacherOverview: React.FC = () => {
 
               <Link
                 to="/teacher/students"
-                className="group flex items-center gap-3 p-3 rounded-lg border border-slate-100 bg-slate-50/60 hover:bg-indigo-50/60 hover:border-indigo-100 transition-colors"
+                className="group flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-white shadow-2xs hover:bg-indigo-50/60 hover:border-indigo-200 transition-colors"
               >
                 <Users className="h-5 w-5 shrink-0 text-emerald-600 group-hover:text-emerald-700 transition-colors" />
                 <div className="min-w-0 flex-1">
@@ -270,7 +269,7 @@ export const TeacherOverview: React.FC = () => {
 
               <Link
                 to="/teacher/results"
-                className="group flex items-center gap-3 p-3 rounded-lg border border-slate-100 bg-slate-50/60 hover:bg-indigo-50/60 hover:border-indigo-100 transition-colors"
+                className="group flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-white shadow-2xs hover:bg-indigo-50/60 hover:border-indigo-200 transition-colors"
               >
                 <Award className="h-5 w-5 shrink-0 text-purple-600 group-hover:text-purple-700 transition-colors" />
                 <div className="min-w-0 flex-1">
@@ -294,7 +293,7 @@ export const TeacherOverview: React.FC = () => {
                   <ShieldAlert className="h-4 w-4 text-amber-500" />
                   Session Event Recording
                 </CardTitle>
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600">
+                <span className="inline-flex items-center gap-1 text-2xs font-semibold text-emerald-600">
                   <AlertCircle className="h-3.5 w-3.5" />
                   During attempts
                 </span>

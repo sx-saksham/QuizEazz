@@ -1,7 +1,9 @@
 import React, { useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { FileText, ArrowRight, AlertCircle } from 'lucide-react'
+import { Button } from '../common/Button'
 import { fetchMyResults, type ResultRow } from '../../lib/studentApi'
+import { attemptEvaluationState } from '../../lib/attemptStatus'
 import { useAsyncData } from '../../hooks/useAsyncData'
 
 export const StudentResultsPage: React.FC = () => {
@@ -18,16 +20,9 @@ export const StudentResultsPage: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold tracking-tight text-slate-900">Results</h1>
           <p className="mt-1 text-xs text-slate-500">
-            Your programming answers are being evaluated in an isolated environment. No marks are awarded until a verdict is produced.
+            Submitted examinations, scores, and evaluation status.
           </p>
         </div>
-        <button
-          onClick={reload}
-          disabled={loading}
-          className="text-xs font-medium text-slate-500 hover:text-indigo-600 transition-colors disabled:opacity-50"
-        >
-          {loading ? 'Refreshing...' : 'Refresh'}
-        </button>
       </div>
 
       {loading ? (
@@ -37,6 +32,11 @@ export const StudentResultsPage: React.FC = () => {
           <AlertCircle className="h-5 w-5 text-rose-500 mx-auto mb-2" />
           <h3 className="text-sm font-semibold text-rose-900">Unable to Load Results</h3>
           <p className="mt-1 text-xs text-rose-700">{error}</p>
+          <div className="mt-4">
+            <Button variant="secondary" size="sm" onClick={reload}>
+              Try Again
+            </Button>
+          </div>
         </div>
       ) : results.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-200 bg-white p-12 text-center max-w-lg mx-auto">
@@ -68,49 +68,47 @@ export const StudentResultsPage: React.FC = () => {
                       ? Math.round((res.score / res.total_marks) * 100)
                       : null
 
-                  // "Evaluated" is only truthful when nothing is still waiting
-                  // on a real verdict. This count is supplied by the server.
-                  // A missing value is treated as "unknown -> pending" so the
-                  // UI never over-claims a completed evaluation.
-                  const pending = res.programming_pending
-                  const isPending = pending === undefined || pending > 0
+                  // Authoritative mapping via the shared helper: attempt status
+                  // alone decides. `evaluated` is final (score/percentage/
+                  // status all final). `in_progress` is live (no submitted
+                  // timestamp, no score). Anything else is genuinely
+                  // unfinished evaluation.
+                  const state = attemptEvaluationState(res.status)
+                  const isLive = state === 'in_progress'
+                  const evaluation =
+                    state === 'evaluated'
+                      ? { label: 'Evaluated', cls: 'bg-emerald-50 text-emerald-700' }
+                      : state === 'in_progress'
+                      ? { label: 'In Progress', cls: 'bg-blue-50 text-blue-700' }
+                      : { label: 'Evaluation in progress', cls: 'bg-amber-50 text-amber-800' }
 
                   return (
                     <tr key={res.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="py-3.5 px-4 font-semibold text-slate-900">{res.exam_title}</td>
                       <td className="py-3.5 px-4 text-slate-500 whitespace-nowrap">
-                        {res.date ? new Date(res.date).toLocaleDateString('en-GB') : '—'}
+                        {res.submitted_at
+                          ? new Date(res.submitted_at).toLocaleString('en-US', {
+                              day: '2-digit',
+                              month: '2-digit',
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              hour12: true,
+                            })
+                          : 'Not submitted'}
                       </td>
                       <td className="py-3.5 px-4 text-right font-medium">
-                        {res.score !== null ? `${res.score} / ${res.total_marks}` : '—'}
-                        {isPending && res.score !== null && (
-                          <span className="block text-2xs font-normal text-slate-500">
-                            provisional
-                          </span>
-                        )}
+                        {isLive || res.score === null ? '—' : `${res.score} / ${res.total_marks}`}
                       </td>
                       <td className="py-3.5 px-4 text-right font-semibold text-slate-900">
-                        {pct !== null ? `${pct}%` : '—'}
+                        {isLive || pct === null ? '—' : `${pct}%`}
                       </td>
                       <td className="py-3.5 px-4">
                         <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold ${
-                            isPending
-                              ? 'bg-amber-50 text-amber-800'
-                              : 'bg-emerald-50 text-emerald-700'
-                          }`}
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-2xs font-semibold ${evaluation.cls}`}
                         >
-                          {isPending
-                            ? 'Evaluation Pending'
-                            : 'Evaluated'}
+                          {evaluation.label}
                         </span>
-                        {isPending && (
-                          <span className="block text-2xs text-slate-500 mt-0.5">
-                            {pending === undefined
-                              ? 'Code execution pending'
-                              : `${pending} programming question${pending === 1 ? '' : 's'} awaiting execution`}
-                          </span>
-                        )}
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <button

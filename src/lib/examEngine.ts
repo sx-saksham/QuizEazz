@@ -171,6 +171,9 @@ export type SecurityEventType =
   | 'visibility_hidden'
   | 'fullscreen_exit'
   | 'tab_switch'
+  | 'copy_attempt'
+  | 'cut_attempt'
+  | 'paste_attempt'
 
 export async function logSecurityEvent(
   attemptId: string,

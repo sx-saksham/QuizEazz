@@ -33,14 +33,18 @@ export interface ResultRow {
   exam_id: string
   exam_title: string
   date: string
+  /** NULL until the attempt is submitted; the UI must not print a
+   * submitted timestamp for unsubmitted (live) attempts. */
+  submitted_at: string | null
   score: number | null
   total_marks: number
   status: string
   /**
    * How many programming questions still have no objective verdict.
-   * Served by get_student_results() as a derived count. Optional so the UI
-   * degrades safely against a database that predates the field — it is
-   * never used to compute or alter a mark.
+   * Served by get_student_results() as a derived count. The attempt-level
+   * status is authoritative: `evaluated` is always final regardless of
+   * this hint. Optional so the UI degrades safely against a database
+   * that predates the field — it is never used to compute a mark.
    */
   programming_pending?: number
 }

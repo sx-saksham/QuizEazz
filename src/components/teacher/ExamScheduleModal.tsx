@@ -179,7 +179,7 @@ export const ExamScheduleModal: React.FC<ExamScheduleModalProps> = ({
         />
 
         <DateTimeField
-          label="Close Time (optional)"
+          label="Closes At (End Time)"
           value={endsAt}
           onChange={setEndsAt}
           hint="If set, candidates cannot start the examination after this time."

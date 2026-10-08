@@ -4,8 +4,9 @@ import { Badge } from '../common/Badge'
 import { EmptyState } from '../common/EmptyState'
 import { Modal } from '../common/Modal'
 import { NotificationBanner } from '../common/NotificationBanner'
-import { Award, RefreshCw, FileCode, AlertCircle, CheckCircle2, XCircle, Clock3 } from 'lucide-react'
+import { Award, FileCode, AlertCircle, CheckCircle2, XCircle, Clock3, Search } from 'lucide-react'
 import { fetchAttemptDetail, fetchAttempts, type AttemptDetail, type AttemptRow } from '../../lib/teacherApi'
+import { CLASS_OPTIONS, BATCH_OPTIONS } from '../../lib/cohort'
 import { useAsyncData } from '../../hooks/useAsyncData'
 import { toErrorMessage } from '../../lib/supabase'
 
@@ -20,9 +21,21 @@ export const TeacherResultsView: React.FC = () => {
   const [detail, setDetail] = useState<AttemptDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [classFilter, setClassFilter] = useState('')
+  const [batchFilter, setBatchFilter] = useState('')
 
-  // RPC-only: exam_attempts is not directly readable by any client role.
-  const loadAttempts = useCallback(() => fetchAttempts(), [])
+  // RPC-only with server-side filters: name search + class + batch compose
+  // in the database (teacher_get_attempts), never in the browser.
+  const loadAttempts = useCallback(
+    () =>
+      fetchAttempts(undefined, {
+        search: searchQuery.trim() || undefined,
+        className: classFilter || undefined,
+        batch: batchFilter || undefined,
+      }),
+    [searchQuery, classFilter, batchFilter],
+  )
   const { data: attempts, error: fetchError, loading, reload } = useAsyncData<AttemptRow[]>(
     loadAttempts,
     [],
@@ -54,15 +67,60 @@ export const TeacherResultsView: React.FC = () => {
           </p>
         </div>
 
-        <Button
-          variant="outline"
-          size="sm"
-          icon={<RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />}
-          onClick={reload}
-          disabled={loading}
-        >
-          Refresh
-        </Button>
+      </div>
+
+      {/* Server-side candidate filters: name search + class + batch compose
+          in the faculty RPC (teacher_get_attempts), never in the browser. */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs">
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search student name..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              aria-label="Filter by class"
+              value={classFilter}
+              onChange={(e) => setClassFilter(e.target.value)}
+              className="text-xs rounded-lg border border-slate-300 py-2 px-3 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="">All Classes</option>
+              {CLASS_OPTIONS.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="Filter by batch"
+              value={batchFilter}
+              onChange={(e) => setBatchFilter(e.target.value)}
+              className="text-xs rounded-lg border border-slate-300 py-2 px-3 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="">All Batches</option>
+              {BATCH_OPTIONS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        {!loading && !fetchError && (
+          <p className="mt-2 text-xs font-semibold text-slate-500">
+            Showing {attempts.length} submission{attempts.length === 1 ? '' : 's'}
+            {classFilter || batchFilter || searchQuery.trim()
+              ? ` matching the active filters`
+              : ''}
+            .
+          </p>
+        )}
       </div>
 
       {loading ? (
@@ -127,8 +185,17 @@ export const TeacherResultsView: React.FC = () => {
                         {a.status.replace('_', ' ').toUpperCase()}
                       </Badge>
                     </td>
-                    <td className="py-3 px-4 text-slate-400">
-                      {a.submitted_at ? new Date(a.submitted_at).toLocaleString() : 'Not submitted'}
+                    <td className="py-3 px-4 text-slate-400 whitespace-nowrap">
+                      {a.submitted_at
+                        ? new Date(a.submitted_at).toLocaleString('en-US', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            hour12: true,
+                          })
+                        : 'Not submitted'}
                     </td>
                     <td className="py-3 px-4 text-right font-bold text-slate-900">
                       {a.score !== null ? `${a.score} / ${a.total_marks}` : '—'}
@@ -209,7 +276,7 @@ export const TeacherResultsView: React.FC = () => {
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="font-bold text-slate-900 shrink-0">Q{idx + 1}</span>
                           <span className="text-slate-700 font-medium truncate">{item.title}</span>
-                          <span className="text-[10px] uppercase font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">
+                          <span className="text-2xs uppercase font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">
                             {item.question_type}
                           </span>
                         </div>
@@ -238,8 +305,7 @@ export const TeacherResultsView: React.FC = () => {
                           </pre>
                           {item.outcome === 'Pending Evaluation' && (
                             <p className="text-2xs text-amber-700 bg-amber-50 border border-amber-200 p-2 rounded">
-                              Awaiting Judge0 CE execution. No marks are awarded until an isolated
-                              runner produces a verdict.
+                              Awaiting evaluation. No marks are awarded until a verdict is produced.
                             </p>
                           )}
                         </div>

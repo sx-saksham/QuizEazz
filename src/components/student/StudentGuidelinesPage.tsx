@@ -12,7 +12,6 @@ import {
   Clock,
   ListChecks,
   Code2,
-  Info,
 } from 'lucide-react'
 
 interface Guideline {
@@ -137,19 +136,6 @@ export const StudentGuidelinesPage: React.FC = () => (
             Rules that apply to every QuizEazz examination session
           </p>
         </div>
-      </div>
-    </div>
-
-    <div className="flex items-start gap-3 rounded-xl border border-amber-200/80 bg-amber-50/60 p-4 text-xs text-amber-950">
-      <Info className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
-      <div className="space-y-1">
-        <p className="font-semibold text-amber-900">What this platform can and cannot do</p>
-        <p className="text-slate-700 text-2xs leading-relaxed">
-          QuizEazz records factual browser events (window blur, tab switches) and pauses your exam
-          when focus is lost. It cannot detect screenshots taken at the operating-system level,
-          keyboard shortcuts, or activity on a second device. Those risks are addressed by running on
-          a locked-down college workstation under physical invigilation — not by software alone.
-        </p>
       </div>
     </div>
 

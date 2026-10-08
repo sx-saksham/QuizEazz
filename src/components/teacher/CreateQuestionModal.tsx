@@ -5,7 +5,6 @@ import {
   ShieldCheck,
   AlertCircle,
   FileCode,
-  Info,
 } from 'lucide-react'
 import { Modal } from '../common/Modal'
 import { Button } from '../common/Button'
@@ -81,11 +80,12 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
   // Common Fields
   const [title, setTitle] = useState(editingQuestion?.title ?? '')
   const [statement, setStatement] = useState(editingQuestion?.question_text ?? '')
-  const [category, setCategory] = useState(editingQuestion?.category ?? 'Data Structures')
-  const [subcategory, setSubcategory] = useState(editingQuestion?.subcategory ?? 'Arrays')
+  // Classification is not part of the product: new questions file under a
+  // fixed bucket, and edits preserve the stored values untouched.
+  const [category] = useState(editingQuestion?.category ?? 'General')
+
   // Difficulty is assigned server-side and is not editable from this form.
   const [marks, setMarks] = useState<number>(editingQuestion?.marks ?? 10)
-  const [explanation, setExplanation] = useState(editingQuestion?.explanation ?? '')
 
   // Coding Specific Fields - QuizEazz V1 is C++ only. There is no language
   // selector: every programming question is authored, stored and graded as C++.
@@ -157,9 +157,11 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
         question_text: statement.trim(),
         question_type: questionType,
         category,
-        subcategory: subcategory.trim() || null,
+        // Subcategory and explanation are not part of the product: new
+        // questions file them as null, edits preserve the stored values.
+        subcategory: editingQuestion ? editingQuestion.subcategory : null,
         marks: Number(marks),
-        explanation: explanation.trim() || null,
+        explanation: editingQuestion ? (editingQuestion.explanation ?? null) : null,
         language: questionType === 'coding' ? language : null,
         input_requirements: questionType === 'coding' ? inputRequirements.trim() : null,
         output_requirements: questionType === 'coding' ? outputRequirements.trim() : null,
@@ -292,34 +294,6 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
           </div>
         </div>
 
-        {/* Classification Row (Difficulty Tier removed per requirements) */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-2xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-              Category
-            </label>
-            <select
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            >
-              <option value="Data Structures">Data Structures</option>
-              <option value="Algorithms">Algorithms</option>
-              <option value="Object Oriented Programming">Object Oriented Programming</option>
-              <option value="Core Programming">Core Programming</option>
-            </select>
-          </div>
-
-          <div>
-            <Input
-              label="Subcategory / Topic"
-              placeholder="e.g. Linked Lists, Two Pointers"
-              value={subcategory}
-              onChange={(e) => setSubcategory(e.target.value)}
-            />
-          </div>
-        </div>
-
         {/* Problem Statement */}
         <div>
           <label className="block text-2xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">
@@ -334,41 +308,9 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
           />
         </div>
 
-        {/* Optional Explanation / Solution Notes */}
-        <div>
-          <label className="block text-2xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-            Internal Faculty Notes / Rubric (Optional)
-          </label>
-          <textarea
-            value={explanation}
-            onChange={(e) => setExplanation(e.target.value)}
-            placeholder="Internal grading notes or theoretical solution summary..."
-            className="w-full rounded-xl border border-slate-300 bg-white p-2.5 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[80px] max-h-[80px] overflow-y-auto resize-none custom-scrollbar"
-          />
-        </div>
-
-        {/* CODING SPECIFICATIONS & AUTOMATED EVALUATION CASE DERIVATION */}
+        {/* CODING SPECIFICATIONS */}
         {questionType === 'coding' && (
           <div className="space-y-4 pt-2 border-t border-slate-200">
-            <div className="rounded-xl border border-amber-100 bg-amber-50/60 p-3.5">
-              <div className="flex items-start gap-2">
-                <Info className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <h4 className="text-xs font-bold text-amber-900">
-                    Programming evaluation status
-                  </h4>
-                  <p className="text-2xs text-amber-900/80 leading-relaxed">
-                    The question can be authored and assigned now. Objective code execution requires a
-                    connected <strong>Judge0 CE</strong> sandbox, which is not part of this
-                    deployment yet. Until then, submitted code is recorded and shown back to faculty
-                    and candidates, but it is graded as{' '}
-                    <strong>Pending Evaluation</strong> and awards no marks. No marks are ever
-                    estimated or inferred.
-                  </p>
-                </div>
-              </div>
-            </div>
-
             {/* Language & Specifications */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
@@ -434,7 +376,7 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
                   onChange={(e) => setStarterCode(e.target.value)}
                   className="w-full rounded-xl border border-slate-300 font-mono text-2xs p-3 bg-slate-900 text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[160px] max-h-[160px] overflow-y-auto resize-none custom-scrollbar"
                 />
-                <p className="text-[10px] text-slate-400 mt-1">
+                <p className="text-2xs text-slate-400 mt-1">
                   This skeleton code is presented to candidates in Monaco Editor during the exam.
                 </p>
               </div>
@@ -450,7 +392,7 @@ export const CreateQuestionModal: React.FC<CreateQuestionModalProps> = ({
                   className="w-full rounded-xl border border-indigo-300 font-mono text-2xs p-3 bg-slate-900 text-emerald-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[160px] max-h-[160px] overflow-y-auto resize-none custom-scrollbar"
                   required
                 />
-                <p className="text-[10px] text-slate-400 mt-1">
+                <p className="text-2xs text-slate-400 mt-1">
                   Stored server-side. Candidates never receive this content.
                 </p>
               </div>

@@ -24,11 +24,16 @@ import {
   Unlock,
   CalendarCog,
 } from 'lucide-react'
-import { createExam, fetchExams, setExamStatus, updateExam } from '../../lib/teacherApi'
+import { createExam, fetchExams, setExamStatus, updateExam, publishExamNow, deleteExam, setExamArchived } from '../../lib/teacherApi'
 import { useAsyncData } from '../../hooks/useAsyncData'
 import { toErrorMessage } from '../../lib/supabase'
 
 type Banner = { type: 'success' | 'error' | 'info'; message: string } | null
+
+/** Module scope: impure clock read kept out of the component render path. */
+function isFutureDate(when: Date): boolean {
+  return when.getTime() > Date.now()
+}
 
 export const TeacherExamsView: React.FC = () => {
   const [banner, setBanner] = useState<Banner>(null)
@@ -39,6 +44,7 @@ export const TeacherExamsView: React.FC = () => {
   const [durationMinutes, setDurationMinutes] = useState(60)
   const [status, setStatus] = useState<'published' | 'draft'>('published')
   const [startsAt, setStartsAt] = useState('')
+  const [endsAt, setEndsAt] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
@@ -46,6 +52,100 @@ export const TeacherExamsView: React.FC = () => {
   const [paperFor, setPaperFor] = useState<Exam | null>(null)
   const [scheduleFor, setScheduleFor] = useState<Exam | null>(null)
   const [statusBusyId, setStatusBusyId] = useState<string | null>(null)
+  const [publishingExam, setPublishingExam] = useState<Exam | null>(null)
+  const [publishBusy, setPublishBusy] = useState(false)
+  const [publishError, setPublishError] = useState<string | null>(null)
+  const [selectedExamIds, setSelectedExamIds] = useState<Set<string>>(new Set())
+  const [examSelectionMode, setExamSelectionMode] = useState(false)
+  const [showBulkExamDelete, setShowBulkExamDelete] = useState(false)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [blockedExamIds, setBlockedExamIds] = useState<string[]>([])
+  const [examArchiveBusy, setExamArchiveBusy] = useState(false)
+
+  const toggleExamSelected = (id: string) => {
+    setSelectedExamIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handlePublishNow = async () => {
+    if (!publishingExam || publishBusy) return
+    setPublishBusy(true)
+    setPublishError(null)
+    try {
+      await publishExamNow(publishingExam.id)
+      setPublishingExam(null)
+      setBanner({ type: 'success', message: `"${publishingExam.title}" is now published and available to its assigned students.` })
+      reloadExams()
+    } catch (err) {
+      setPublishError(toErrorMessage(err, 'Unable to publish the examination.'))
+    } finally {
+      setPublishBusy(false)
+    }
+  }
+
+  const handleBulkExamDelete = async () => {
+    if (selectedExamIds.size === 0 || deleteBusy) return
+    setDeleteBusy(true)
+    setDeleteError(null)
+    setBlockedExamIds([])
+    const ids = Array.from(selectedExamIds)
+    const blocked: string[] = []
+    const blockedIdList: string[] = []
+    let deleted = 0
+    const titleOf = (id: string) => exams.find((e) => e.id === id)?.title ?? id
+    for (const id of ids) {
+      try {
+        await deleteExam(id)
+        deleted += 1
+      } catch (err) {
+        blocked.push(`${titleOf(id)}: ${toErrorMessage(err, 'Unable to delete the examination.')}`)
+        blockedIdList.push(id)
+      }
+    }
+    setDeleteBusy(false)
+    setBlockedExamIds(blockedIdList)
+    if (blocked.length > 0) {
+      setDeleteError(
+        `Deleted ${deleted} of ${ids.length}. These have candidate attempts and are protected:\n` +
+          blocked.join('\n'),
+      )
+    } else {
+      setShowBulkExamDelete(false)
+      setExamSelectionMode(false)
+      setSelectedExamIds(new Set())
+      setBanner({ type: 'success', message: `Deleted ${deleted} examination${deleted === 1 ? '' : 's'}.` })
+    }
+    reloadExams()
+  }
+
+  const handleArchiveBlockedExams = async () => {
+    if (blockedExamIds.length === 0 || examArchiveBusy) return
+    setExamArchiveBusy(true)
+    try {
+      for (const id of blockedExamIds) {
+        await setExamArchived(id, true)
+      }
+      setShowBulkExamDelete(false)
+      setExamSelectionMode(false)
+      setSelectedExamIds(new Set())
+      setBlockedExamIds([])
+      setDeleteError(null)
+      setBanner({
+        type: 'success',
+        message: `Archived ${blockedExamIds.length} examination${blockedExamIds.length === 1 ? '' : 's'} from the active list. History preserved.`,
+      })
+      reloadExams()
+    } catch (err) {
+      setDeleteError(toErrorMessage(err, 'Unable to archive the protected examinations.'))
+    } finally {
+      setExamArchiveBusy(false)
+    }
+  }
 
   // Edit-details state. The modal remounts per exam (key) so fields always
   // start from the stored row. Blocked server-side once finalized attempts
@@ -111,6 +211,7 @@ export const TeacherExamsView: React.FC = () => {
     setDurationMinutes(60)
     setStatus('published')
     setStartsAt('')
+    setEndsAt('')
     setFormError(null)
   }
 
@@ -133,8 +234,20 @@ export const TeacherExamsView: React.FC = () => {
     if (Number.isNaN(when.getTime())) {
       return setFormError('Please provide a valid scheduled start date and time.')
     }
-    if (when.getTime() <= Date.now()) {
+    if (!isFutureDate(when)) {
       return setFormError('The scheduled start time must be in the future.')
+    }
+
+    let endsAtIso: string | null = null
+    if (endsAt) {
+      const closes = new Date(endsAt)
+      if (Number.isNaN(closes.getTime())) {
+        return setFormError('Please provide a valid close date and time.')
+      }
+      if (closes.getTime() <= when.getTime()) {
+        return setFormError('The close time must be later than the start time.')
+      }
+      endsAtIso = closes.toISOString()
     }
 
     setSubmitting(true)
@@ -145,6 +258,7 @@ export const TeacherExamsView: React.FC = () => {
         duration_minutes: duration,
         status,
         starts_at: when.toISOString(),
+        ends_at: endsAtIso,
       })
       // Only report success once the server has confirmed the row.
       setShowCreate(false)
@@ -201,26 +315,56 @@ export const TeacherExamsView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            icon={<RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />}
-            onClick={reloadExams}
-            disabled={loading}
-          >
-            Refresh
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            icon={<Plus className="h-3.5 w-3.5" />}
-            onClick={() => {
-              resetForm()
-              setShowCreate(true)
-            }}
-          >
-            Create Examination
-          </Button>
+          {examSelectionMode ? (
+            <>
+              <span className="text-xs font-semibold text-slate-600">
+                {selectedExamIds.size} selected
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setDeleteError(null)
+                  setShowBulkExamDelete(true)
+                }}
+                disabled={selectedExamIds.size === 0}
+              >
+                Delete Selected{selectedExamIds.size > 0 ? ` (${selectedExamIds.size})` : ''}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setExamSelectionMode(false)
+                  setSelectedExamIds(new Set())
+                  setDeleteError(null)
+                }}
+              >
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setExamSelectionMode(true)}
+              >
+                Select
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<Plus className="h-3.5 w-3.5" />}
+                onClick={() => {
+                  resetForm()
+                  setShowCreate(true)
+                }}
+              >
+                Create Examination
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -273,11 +417,23 @@ export const TeacherExamsView: React.FC = () => {
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {exams.map((exam) => {
             const view = statusView(exam)
+            const isSelected = selectedExamIds.has(exam.id)
             return (
               <Card key={exam.id} hoverEffect className="flex flex-col justify-between">
                 <CardHeader>
                   <div className="flex items-start justify-between gap-2">
-                    <CardTitle className="text-sm font-semibold line-clamp-1">{exam.title}</CardTitle>
+                    <div className="flex items-start gap-2 min-w-0">
+                      {examSelectionMode && (
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleExamSelected(exam.id)}
+                          aria-label={`Select examination ${exam.title}`}
+                          className="mt-1 h-4 w-4 shrink-0 accent-indigo-600"
+                        />
+                      )}
+                      <CardTitle className="text-sm font-semibold line-clamp-1">{exam.title}</CardTitle>
+                    </div>
                     <Badge variant={view.variant} size="sm">
                       {view.label}
                     </Badge>
@@ -324,6 +480,17 @@ export const TeacherExamsView: React.FC = () => {
                     </div>
                   )}
 
+                  {exam.ends_at && (
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-1 text-slate-400">
+                        <Calendar className="h-3.5 w-3.5" /> Closes
+                      </span>
+                      <span className="font-medium text-slate-700 text-2xs">
+                        {new Date(exam.ends_at).toLocaleString()}
+                      </span>
+                    </div>
+                  )}
+
                   {(exam.submitted_count ?? 0) > 0 && (
                     <p className="pt-1 text-2xs text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-md px-2 py-1">
                       {exam.submitted_count} submission(s) received — paper is locked.
@@ -331,25 +498,42 @@ export const TeacherExamsView: React.FC = () => {
                   )}
                 </CardContent>
 
-                <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3 rounded-b-xl flex items-center justify-between gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    icon={<Users className="h-3.5 w-3.5" />}
-                    onClick={() => setAssignFor(exam)}
-                  >
-                    Assign Students
-                  </Button>
-
-                  <div className="flex items-center gap-1.5">
+                <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3 rounded-b-xl flex flex-col gap-2">
+                  {exam.status === 'draft' && (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => {
+                        setPublishError(null)
+                        setPublishingExam(exam)
+                      }}
+                      className="w-full justify-center"
+                    >
+                      Publish Now
+                    </Button>
+                  )}
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<Users className="h-3.5 w-3.5" />}
+                      onClick={() => setAssignFor(exam)}
+                      className="justify-center"
+                    >
+                      Assign Students
+                    </Button>
                     <Button
                       variant="ghost"
                       size="sm"
                       onClick={() => setPaperFor(exam)}
                       icon={<ListChecks className="h-3.5 w-3.5" />}
+                      className="justify-center"
                     >
                       Manage Paper
                     </Button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
                     <Button
                       variant="ghost"
                       size="sm"
@@ -357,25 +541,28 @@ export const TeacherExamsView: React.FC = () => {
                     >
                       Edit
                     </Button>
-                    <button
-                      title="Edit schedule"
-                      onClick={() => setScheduleFor(exam)}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
-                    >
-                      <CalendarCog className="h-4 w-4" />
-                    </button>
-                    <button
-                      title={exam.status === 'closed' ? 'Reopen examination' : 'Close examination'}
-                      disabled={statusBusyId === exam.id}
-                      onClick={() => void handleToggleClosed(exam)}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors disabled:opacity-40"
-                    >
-                      {exam.status === 'closed' ? (
-                        <Unlock className="h-4 w-4" />
-                      ) : (
-                        <Lock className="h-4 w-4" />
-                      )}
-                    </button>
+                    <span className="flex-1" />
+                    <span className="flex items-center gap-1 border-l border-slate-200 pl-2">
+                      <button
+                        title="Edit schedule"
+                        onClick={() => setScheduleFor(exam)}
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                      >
+                        <CalendarCog className="h-4 w-4" />
+                      </button>
+                      <button
+                        title={exam.status === 'closed' ? 'Reopen examination' : 'Close examination'}
+                        disabled={statusBusyId === exam.id}
+                        onClick={() => void handleToggleClosed(exam)}
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors disabled:opacity-40"
+                      >
+                        {exam.status === 'closed' ? (
+                          <Unlock className="h-4 w-4" />
+                        ) : (
+                          <Lock className="h-4 w-4" />
+                        )}
+                      </button>
+                    </span>
                   </div>
                 </div>
               </Card>
@@ -407,7 +594,7 @@ export const TeacherExamsView: React.FC = () => {
             <Input
               type="text"
               required
-              placeholder="e.g. Data Structures Midterm Examination"
+              placeholder="e.g. Coding Midterm Examination"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               className="text-xs"
@@ -463,6 +650,13 @@ export const TeacherExamsView: React.FC = () => {
             onChange={setStartsAt}
             error={formError && !startsAt ? null : undefined}
             hint="Candidates can only begin this examination once the scheduled start time arrives. The database enforces this."
+          />
+
+          <DateTimeField
+            label="Closes At (End Time)"
+            value={endsAt}
+            onChange={setEndsAt}
+            hint="If set, candidates cannot start after this time. Their attempt timer (Duration) is separate and still applies once started."
           />
 
           <div className="flex items-center justify-end gap-2 pt-4 border-t border-slate-200">
@@ -574,6 +768,127 @@ export const TeacherExamsView: React.FC = () => {
                 {editSaving ? 'Saving...' : 'Save Changes'}
               </Button>
             </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* PUBLISH NOW */}
+      {publishingExam && (
+        <Modal
+          isOpen={!!publishingExam}
+          onClose={() => {
+            if (!publishBusy) {
+              setPublishingExam(null)
+              setPublishError(null)
+            }
+          }}
+          title="Publish this exam now?"
+          subtitle={publishingExam.title}
+          maxWidth="lg"
+          footer={
+            <div className="flex items-center justify-end gap-2 w-full">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setPublishingExam(null)
+                  setPublishError(null)
+                }}
+                disabled={publishBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => void handlePublishNow()}
+                disabled={publishBusy}
+                isLoading={publishBusy}
+              >
+                {publishBusy ? 'Publishing...' : 'Publish Now'}
+              </Button>
+            </div>
+          }
+        >
+          <div className="space-y-3">
+            <p className="text-xs text-slate-700 leading-relaxed">
+              This will make the exam available to its assigned students immediately. The paper
+              is re-validated and frozen exactly as it stands.
+            </p>
+            {publishError && (
+              <div className="flex items-start gap-2 rounded-lg bg-rose-50 border border-rose-200 p-3 text-xs text-rose-700">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-500" />
+                <span>{publishError}</span>
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {/* DELETE EXAMS (bulk). Per-exam dependency errors are reported by
+          name; protected exams are never touched. */}
+      {showBulkExamDelete && (
+        <Modal
+          isOpen={showBulkExamDelete}
+          onClose={() => {
+            if (!deleteBusy) {
+              setShowBulkExamDelete(false)
+              setDeleteError(null)
+            }
+          }}
+          title={`Delete ${selectedExamIds.size} Selected Examination${selectedExamIds.size === 1 ? '' : 's'}`}
+          subtitle="This cannot be undone"
+          maxWidth="lg"
+          footer={
+            <div className="flex items-center justify-end gap-2 w-full">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setShowBulkExamDelete(false)
+                  setDeleteError(null)
+                }}
+                disabled={deleteBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => void handleBulkExamDelete()}
+                disabled={deleteBusy}
+                isLoading={deleteBusy}
+              >
+                {deleteBusy ? 'Deleting...' : `Delete ${selectedExamIds.size} Selected`}
+              </Button>
+            </div>
+          }
+        >
+          <div className="space-y-3">
+            <p className="text-xs text-slate-700 leading-relaxed">
+              This permanently removes the selected examinations, their papers and their
+              assignments. An examination with any candidate attempt is protected: it is kept
+              untouched, and you can hide it from this list instead without losing history.
+            </p>
+            {deleteError && (
+              <div className="flex items-start gap-2 rounded-lg bg-rose-50 border border-rose-200 p-3 text-xs text-rose-700">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-500" />
+                <span>{deleteError}</span>
+              </div>
+            )}
+            {blockedExamIds.length > 0 && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void handleArchiveBlockedExams()}
+                disabled={examArchiveBusy}
+                isLoading={examArchiveBusy}
+              >
+                {examArchiveBusy
+                  ? 'Archiving...'
+                  : `Archive ${blockedExamIds.length} Protected Instead`}
+              </Button>
+            )}
           </div>
         </Modal>
       )}

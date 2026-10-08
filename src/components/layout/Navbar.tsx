@@ -51,7 +51,7 @@ export const Navbar: React.FC = () => {
             <p className="text-xs font-semibold text-slate-800 leading-tight">
               {displayName}
             </p>
-            <p className="text-[11px] text-slate-400 capitalize">
+            <p className="text-2xs text-slate-400 capitalize">
               {displayRole}
             </p>
           </div>

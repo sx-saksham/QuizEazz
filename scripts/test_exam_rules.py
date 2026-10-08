@@ -447,6 +447,513 @@ def test_submission_is_single_server_call():
     )
 
 
+def _src(rel):
+    return (ROOT / "src" / rel).read_text(encoding="utf-8", errors="replace")
+
+
+def test_results_state_mapping_is_truthful():
+    """A-D (corrected). Finality is keyed on the ATTEMPT status the server
+    finalized — never on the stale metadata pending hint. An `evaluated`
+    attempt renders Evaluated + final score with no provisional language,
+    even if its metadata still carries a nonzero pending count (pre-Judge0
+    rows). Only non-final, non-live attempts show Evaluation in progress."""
+    txt = _src("components/student/StudentResultsPage.tsx")
+    check(
+        "finality is keyed on evaluated attempt status",
+        "attemptEvaluationState(res.status)" in txt and "state === 'evaluated'" in txt,
+    )
+    check(
+        "live attempts render as In Progress",
+        "state === 'in_progress'" in txt and "In Progress" in _src("lib/attemptStatus.ts"),
+    )
+    check(
+        "unfinished attempts show Evaluation in progress",
+        "Evaluation in progress" in txt,
+    )
+    check(
+        "no provisional language for finalized results",
+        "provisional" not in txt,
+    )
+    check(
+        "evaluated badge text present",
+        "'Evaluated'" in txt or '"Evaluated"' in txt or '>Evaluated<' in txt or 'Evaluated' in txt,
+    )
+
+
+def test_submitted_datetime_display():
+    """D. Date AND time from persisted submitted_at, user-local timezone."""
+    txt = _src("components/student/StudentResultsPage.tsx")
+    check(
+        "results render date and time, not date only",
+        "toLocaleString('en-US'" in txt and "hour" in txt and "minute" in txt,
+    )
+    check(
+        "no date-only rendering remains on the results table",
+        "toLocaleDateString" not in txt,
+    )
+
+
+def test_absolute_timer_hardening():
+    """E-H. Deadline is absolute: pause/close/reopen never extend it."""
+    txt = _src("components/student/ExamTakingScreen.tsx")
+    check(
+        "absolute deadline stored from started_at plus duration",
+        re.search(r"deadlineRef\.current =\s*\n?\s*new Date\(activeAttempt\.started_at\)", txt) is not None
+        or "started_at).getTime() + resolvedDuration * 60 * 1000" in txt,
+    )
+    check(
+        "countdown recomputes remaining from the deadline every tick",
+        "deadlineRef.current - Date.now()" in txt,
+    )
+    check(
+        "pause cannot freeze the countdown tick",
+        re.search(r"if \(phase !== 'active' \|\| isPaused", txt) is None,
+    )
+    check(
+        "no decrement-from-stale-state countdown remains",
+        "setTimeLeft((prev)" not in txt,
+        "the timer must recompute from deadlineRef, never decrement state",
+    )
+    check(
+        "reopening after the deadline expires immediately",
+        "setIsTimeExpired(true)" in txt,
+    )
+    check(
+        "expiry auto-submits through the server path",
+        re.search(r"if \(isTimeExpired && attempt && !submittingRef\.current\)", txt) is not None,
+    )
+    check(
+        "copy/cut/paste are blocked outside the code editor",
+        "monaco-editor" in txt and "preventDefault" in txt,
+    )
+    check(
+        "clipboard violations are logged, never time-granting",
+        "copy_attempt" in txt or "Clipboard" in txt,
+    )
+
+
+def test_safe_delete_and_publish_wiring():
+    """I-L, R-V. Students cannot reach faculty mutations; faculty UI exists."""
+    mig = (ROOT / "supabase" / "migration_13_publish_now_and_safe_delete.sql").read_text(encoding="utf-8")
+    check("migration 13 exists with publish-now RPC", "teacher_publish_now" in mig)
+    check("migration 13 exists with safe delete RPCs",
+          "teacher_delete_question" in mig and "teacher_delete_exam" in mig)
+    check(
+        "publish validates before flipping status",
+        "already published" in mig and "validated hidden test" in mig,
+    )
+    check(
+        "publish uses the server clock, never the browser clock",
+        re.search(r"starts_at = v_now|v_now := now\(\)", mig) is not None,
+    )
+    check(
+        "delete paths are faculty-gated in SQL",
+        mig.count("quizeazz_assert_faculty(v_caller_id)") >= 3,
+    )
+    check(
+        "question delete is blocked by paper references",
+        "used in" in mig and "exam paper(s)" in mig,
+    )
+    check(
+        "question delete is blocked by answer references",
+        "candidate answer(s) reference it" in mig,
+    )
+    check(
+        "exam delete is blocked by existing attempts",
+        "candidate attempt(s) exist" in mig,
+    )
+    student_files = list((ROOT / "src" / "components" / "student").rglob("*.tsx"))
+    bad = [str(p.relative_to(ROOT)) for p in student_files
+           if "teacher_delete_question" in p.read_text(encoding="utf-8", errors="replace")
+           or "teacher_delete_exam" in p.read_text(encoding="utf-8", errors="replace")
+           or "teacher_publish_now" in p.read_text(encoding="utf-8", errors="replace")
+           or "Publish Now" in p.read_text(encoding="utf-8", errors="replace")]
+    check("students cannot see or invoke publish/delete", not bad, str(bad))
+    tq = _src("components/teacher/TeacherQuestionsView.tsx")
+    check("bank has no per-card delete handler left", "setDeletingQuestion" not in tq)
+    te = _src("components/teacher/TeacherExamsView.tsx")
+    check("exam list exposes Publish Now on drafts only",
+          "exam.status === 'draft'" in te and "Publish Now" in te)
+    check("exam list exposes no per-card delete handler", "setDeletingExam" not in te)
+
+
+def test_registry_filters_and_labels():
+    """M-P. Class/batch filters compose; UUID label is exact."""
+    txt = _src("components/teacher/TeacherStudentsView.tsx")
+    check("class filter offers All + the three classes", "All Classes" in txt and "CLASS_OPTIONS" in txt)
+    check("batch filter offers All + the three batches", "All Batches" in txt and "BATCH_OPTIONS" in txt)
+    check(
+        "filters compose with search",
+        re.search(r"classFilter && s\.class_name !== classFilter", txt) is not None
+        or "s.class_name !== classFilter" in txt,
+    )
+    check("header is exactly UUID, never ROLL", ">UUID<" in txt and "Roll / UUID" not in txt)
+    check(
+        "filtered count reflects the active group",
+        "Showing" in txt and "filteredStudents.length" in txt,
+    )
+
+
+def test_no_manual_refresh_controls():
+    """Q. No visible manual refresh; refetch functions remain for code paths."""
+    hits = []
+    for p in list((ROOT / "src").rglob("*.tsx")):
+        txt = p.read_text(encoding="utf-8", errors="replace")
+        if re.search(r">\s*Refresh(Roster)?\s*<", txt):
+            hits.append(str(p.relative_to(ROOT)))
+    check("no visible Refresh/Refresh Roster buttons remain", not hits, str(hits))
+    check(
+        "refetch functions still exist for code-driven reloads",
+        re.search(r"reload.*\(\)", _src("hooks/useAsyncData.ts")) is not None,
+    )
+
+
+def test_bulk_delete_workflows():
+    """Selection-mode bulk delete replaces per-card Delete buttons.
+    Security stays server-side: students have no path to these RPCs."""
+    tq = _src("components/teacher/TeacherQuestionsView.tsx")
+    check(
+        "bank has a Select entry control, checkboxes only in selection mode",
+        re.search(r">\s*Select\s*<", tq) is not None and "selectionMode && (" in tq,
+    )
+    check(
+        "bank rows have left checkboxes",
+        'aria-label={`Select question' in tq,
+    )
+    check(
+        "bank shows a selection count toolbar with Delete Selected",
+        "selected" in tq and "Delete Selected" in tq and "selectedIds.size === 0" in tq,
+    )
+    check(
+        "bank delete confirmation states the count",
+        re.search(r"Delete \$\{selectedIds\.size\} Selected", tq) is not None,
+    )
+    check(
+        "bank has no per-card Delete button anymore",
+        "setDeletingQuestion" not in tq,
+        "bulk selection (selectedIds) is the only delete path",
+    )
+    check(
+        "bank offers archive-instead for protected questions",
+        "Archive" in tq and "setQuestionArchived" in tq,
+    )
+    te = _src("components/teacher/TeacherExamsView.tsx")
+    check(
+        "exams have a Select entry control and checkboxes in selection mode",
+        re.search(r">\s*Select\s*<", te) is not None and "examSelectionMode && (" in te
+        and 'aria-label={`Select examination' in te,
+    )
+    check(
+        "exams show a selection count toolbar with Delete Selected",
+        "Delete Selected" in te and "selectedExamIds.size === 0" in te,
+    )
+    check(
+        "exam bulk delete reports per-exam protection errors",
+        "are protected" in te,
+    )
+    check(
+        "exams offer archive-instead for protected examinations",
+        "Archive" in te and "setExamArchived" in te,
+    )
+    check(
+        "exam action area is a deliberate two-row layout (no overlap)",
+        "grid grid-cols-2 gap-2" in te and "border-l border-slate-200 pl-2" in te,
+    )
+    check(
+        "publish-now confirmation exists with draft-only gating",
+        "Publish this exam now?" in te
+        and "exam.status === 'draft'" in te,
+    )
+    ta = _src("components/teacher/TeacherAnalyticsView.tsx")
+    check(
+        "clear-log action exists with destructive confirmation",
+        "Clear Log" in ta and "cannot be recovered" in ta,
+    )
+    check(
+        "security log empty state reads exactly 'No security events recorded.'",
+        "No security events recorded." in ta,
+    )
+
+
+def test_question_bank_copy_and_taxonomy():
+    """Exact heading; no obsolete taxonomy in rendered bank UI."""
+    tq = _src("components/teacher/TeacherQuestionsView.tsx")
+    check(
+        "bank heading is exactly 'Question Bank'",
+        re.search(r">\s*Question Bank\s*<", tq) is not None,
+    )
+    check(
+        "bank subtitle is exactly 'Create, manage, and review examination questions.'",
+        "Create, manage, and review examination questions." in tq,
+    )
+    for dead in [
+        "Departmental Question Repository",
+        "Standardized question items",
+        "Data Structures",
+        "Core Programming",
+    ]:
+        check(f"bank renders no {dead!r} text", dead not in tq)
+    check(
+        "bank inspect modal shows no category/subcategory taxonomy",
+        "inspectingQuestion.category" not in tq,
+    )
+    check(
+        "bank card shows C++ and Marks metadata",
+        "C++" in tq and "Marks:" in tq,
+    )
+
+
+def test_phase_e_corrections():
+    """Phase E final correction: selection Cancel, Publish Now prominence,
+    Closes At wiring, teacher result filters, truthful student mapping."""
+    tq = _src("components/teacher/TeacherQuestionsView.tsx")
+    te = _src("components/teacher/TeacherExamsView.tsx")
+    # 1. Selection exits via Cancel, never Done.
+    for name, txt in (("bank", tq), ("exams", te)):
+        check(
+            f"{name} selection exits via Cancel",
+            re.search(r">\s*Cancel\s*<", txt) is not None,
+        )
+        check(
+            f"{name} selection has no Done exit",
+            re.search(r">\s*Done\s*<", txt) is None,
+        )
+    # 2. Publish Now is draft-only and prominent (full-width primary row).
+    check(
+        "publish now renders only for drafts",
+        "exam.status === 'draft'" in te and "Publish Now" in te,
+    )
+    check(
+        "publish now is a full-width primary action",
+        'className="w-full justify-center"' in te,
+    )
+    # 3. Publish transaction is server-authoritative.
+    pub = (ROOT / "supabase" / "migration_13_publish_now_and_safe_delete.sql").read_text(
+        encoding="utf-8"
+    )
+    check("publish uses the server clock", "v_now := now()" in pub)
+    check(
+        "publish rebuilds snapshots at publish time",
+        "quizeazz_build_question_snapshot" in pub,
+    )
+    check(
+        "publish requires validated hidden tests",
+        "validated hidden test" in pub,
+    )
+    # 4. Schedule start/end validation on both UIs and both RPCs.
+    check(
+        "create form validates close after start",
+        "The close time must be later than the start time." in te,
+    )
+    check(
+        "create form exposes a Closes At field",
+        "Closes At (End Time)" in te,
+    )
+    check(
+        "create RPC accepts a close time",
+        "p_ends_at" in _src("lib/teacherApi.ts"),
+    )
+    mig16 = (ROOT / "supabase" / "migration_16_results_truth_create_ends_filters.sql").read_text(
+        encoding="utf-8"
+    )
+    check(
+        "create RPC validates close after start",
+        "The close time must be later than the start time." in mig16,
+    )
+    check(
+        "schedule RPC validates close after start",
+        "The close time must be later than the start time."
+        in (ROOT / "supabase" / "migration_exam_management_integrity.sql").read_text(
+            encoding="utf-8"
+        ),
+    )
+    sched = _src("components/teacher/ExamScheduleModal.tsx")
+    check(
+        "schedule modal exposes Closes At",
+        "Closes At (End Time)" in sched,
+    )
+    # 5. Students cannot start after closing (server gate).
+    gate = (ROOT / "supabase" / "migration_06_runtime_blockers_and_attempt_access.sql").read_text(
+        encoding="utf-8"
+    )
+    check(
+        "start path enforces the closing time",
+        "ends_at" in gate,
+    )
+    # 6-8. Teacher result filters: UI controls + RPC params + SQL filters.
+    tr = _src("components/teacher/TeacherResultsView.tsx")
+    check(
+        "teacher results have a name search box",
+        "Search student name..." in tr,
+    )
+    check(
+        "teacher results have class and batch selects",
+        "All Classes" in tr and "All Batches" in tr,
+    )
+    check(
+        "teacher results show a filtered count",
+        "Showing {attempts.length}" in tr,
+    )
+    check(
+        "results fetch sends filters to the RPC",
+        "p_search" in _src("lib/teacherApi.ts")
+        and "p_class" in _src("lib/teacherApi.ts")
+        and "p_batch" in _src("lib/teacherApi.ts"),
+    )
+    check(
+        "attempts RPC filters name/class/batch server-side",
+        "p_search" in mig16 and "ILIKE" in mig16
+        and "p.class_name = trim(p_class)" in mig16
+        and "p.batch = trim(p_batch)" in mig16,
+    )
+    # 9. Evaluated attempts render evaluated (status authoritative).
+    sr = _src("components/student/StudentResultsPage.tsx")
+    check(
+        "student mapping keys finality on attempt status",
+        "attemptEvaluationState(res.status)" in sr,
+    )
+    check(
+        "evaluated forces zero pending in the student RPC",
+        "WHEN att.status = 'evaluated' THEN 0" in mig16,
+    )
+    # 10. In-progress renders live with no submitted timestamp.
+    check(
+        "in-progress renders as live without a submitted time",
+        "state === 'in_progress'" in sr and "Not submitted" in sr,
+    )
+    check(
+        "submitted timestamp comes from submitted_at, not a fallback",
+        "submitted_at" in sr,
+    )
+    # 11. No provisional language for finalized results.
+    check(
+        "student results list never says provisional",
+        "provisional" not in sr,
+    )
+    # 12. Exam-card action layout markers (deliberate two-row grid).
+    check(
+        "exam actions use an equal two-column primary row",
+        "grid grid-cols-2 gap-2" in te,
+    )
+    check(
+        "icon-only actions are divider-separated from text actions",
+        "border-l border-slate-200 pl-2" in te,
+    )
+
+
+def test_review_status_authority():
+    """One lifecycle everywhere: attempt status alone decides.
+    Covers the QUIZ5 contradiction (list said in-progress while review
+    badge said Evaluated + body said not completed)."""
+    helper = _src("lib/attemptStatus.ts")
+    check(
+        "single shared helper defines the attempt lifecycle",
+        "attemptEvaluationState" in helper
+        and "ATTEMPT_EVALUATION_LABEL" in helper,
+    )
+    check(
+        "helper maps evaluated/in_progress, defaults the rest to evaluating",
+        "status === 'evaluated'" in helper
+        and "status === 'in_progress'" in helper,
+    )
+    check(
+        "helper bans metadata and answer hints as attempt state",
+        "programming_pending" in helper and "evaluation_status" in helper,
+    )
+    rev = _src("components/student/StudentResultReviewPage.tsx")
+    lst = _src("components/student/StudentResultsPage.tsx")
+    # Both surfaces consume the same helper.
+    check("results list uses the shared helper", "attemptEvaluationState" in lst)
+    check("review page uses the shared helper", "attemptEvaluationState" in rev)
+    # A. evaluated: Evaluated everywhere, never the contradiction copy.
+    check(
+        "review derives its badge from attempt state, not answer outcomes",
+        "evaluationLabel = ATTEMPT_EVALUATION_LABEL[evalState]" in rev,
+    )
+    check(
+        "review never says evaluation is incomplete",
+        "Evaluation has not been completed" not in rev,
+    )
+    check(
+        "review progress banner renders only while evaluating",
+        "evalState === 'evaluating'" in rev,
+    )
+    check(
+        "evaluated with no rows falls back to a neutral recorded message",
+        "Your final result has been recorded." in rev,
+    )
+    check(
+        "review never says provisional",
+        "provisional" not in rev.lower(),
+    )
+    check(
+        "per-question pending notes never show on a final attempt",
+        "evalState !== 'evaluated'" in rev,
+    )
+    check(
+        "a final report is never polled",
+        "attemptEvaluationState(report.status) !== 'evaluating'" in rev,
+    )
+    # B/C. evaluating and in_progress states exist distinctly.
+    check(
+        "review handles the live in_progress state safely",
+        "still in progress" in rev,
+    )
+    # D. Legacy metadata is ignored: no state read of the stale hints.
+    for name, txt in (("results list", lst), ("review page", rev)):
+        body = txt
+        check(
+            f"{name} never reads metadata pending hints for state",
+            "programming_pending" not in body and "programming_evaluated" not in body,
+        )
+        check(
+            f"{name} never infers finality from answer evaluation_status",
+            "evaluation_status" not in body,
+        )
+    # E. Full-repo sweep: no stale attempt-level mapping remains.
+    stale = []
+    for p in list((ROOT / "src").rglob("*.ts")) + list((ROOT / "src").rglob("*.tsx")):
+        t = p.read_text(encoding="utf-8", errors="replace")
+        rel = str(p.relative_to(ROOT))
+        if "Evaluation has not been completed" in t:
+            stale.append(rel + ": incomplete-evaluation copy")
+        if "provisional" in t.lower() and "no provisional" not in t.lower():
+            stale.append(rel + ": provisional wording")
+    check("no stale attempt-level mapping remains in src", not stale, str(stale))
+
+
+def test_registry_layout_and_archive_api():
+    """Class nowrap, UUID header, archive wrappers, dashboard cards."""
+    ts = _src("components/teacher/TeacherStudentsView.tsx")
+    check(
+        "class values stay on one line",
+        "whitespace-nowrap" in ts,
+    )
+    check(
+        "UUID column constrained so Role/Date sit naturally",
+        "max-w-[240px]" in ts,
+    )
+    api = _src("lib/teacherApi.ts")
+    check(
+        "archive wrappers call faculty-gated RPCs",
+        "teacher_set_question_archived" in api and "teacher_set_exam_archived" in api,
+    )
+    to = _src("components/teacher/TeacherOverview.tsx")
+    check(
+        "dashboard stat cards are white surfaces with border+shadow",
+        "rounded-xl border border-slate-200 bg-white" in to,
+    )
+    sb = _src("components/layout/Sidebar.tsx")
+    check(
+        "sidebar active item is visually distinct",
+        "aria-current" in sb and "bg-indigo-100/70" in sb,
+    )
+    check(
+        "no version label rendered in sidebar",
+        "v2.4" not in sb and "QuizEazz v" not in sb,
+    )
+
+
 def main():
     for fn in [
         test_question_order_is_deterministic,
@@ -465,6 +972,17 @@ def main():
         test_no_browser_side_role_or_session_fallback,
         test_no_client_side_grading,
         test_submission_is_single_server_call,
+        test_results_state_mapping_is_truthful,
+        test_submitted_datetime_display,
+        test_absolute_timer_hardening,
+        test_safe_delete_and_publish_wiring,
+        test_registry_filters_and_labels,
+        test_no_manual_refresh_controls,
+        test_bulk_delete_workflows,
+        test_question_bank_copy_and_taxonomy,
+        test_registry_layout_and_archive_api,
+        test_phase_e_corrections,
+        test_review_status_authority,
     ]:
         fn()
 

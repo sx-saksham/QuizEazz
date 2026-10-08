@@ -143,6 +143,12 @@ export const ExamTakingScreen: React.FC = () => {
   // Same-tick de-duplication: one pause + one event per incident, even if both
   // `blur` and `fullscreenchange` arrive from a single Escape press.
   const isPausedRef = useRef(false)
+  // Absolute server-authoritative deadline (started_at + duration). Pausing,
+  // closing or reopening the exam MUST NOT move this: remaining time is always
+  // deadline minus now. The server enforces the same deadline independently.
+  const deadlineRef = useRef(0)
+  // Throttle for copy/cut/paste violation logging (ms between logged events).
+  const lastClipboardEventRef = useRef(0)
 
   // ---------------------------------------------------------------
   // 1. Initialize: authoritative attempt + candidate-safe paper
@@ -186,7 +192,14 @@ export const ExamTakingScreen: React.FC = () => {
 
         const endsAt =
           new Date(activeAttempt.started_at).getTime() + resolvedDuration * 60 * 1000
+        deadlineRef.current = endsAt
         setTimeLeft(Math.max(0, Math.floor((endsAt - Date.now()) / 1000)))
+        if (endsAt - Date.now() <= 0) {
+          // Reopened after the deadline with a still-open attempt: expire
+          // immediately so the auto-submit effect finalizes it. The server
+          // marks it timed_out; no extra time is granted.
+          setIsTimeExpired(true)
+        }
 
         // Distinguishes a genuinely fresh attempt from a resumed one, so the
         // gate never tells a candidate who is already mid-paper that they are
@@ -232,25 +245,28 @@ export const ExamTakingScreen: React.FC = () => {
   }, [user, examId, navigate])
 
   // ---------------------------------------------------------------
-  // 2. Authoritative countdown
+  // 2. Absolute countdown from the server-authoritative deadline
   // ---------------------------------------------------------------
   // Starts only once the candidate has genuinely begun, i.e. fullscreen was
-  // confirmed. The server clock is unaffected: save_exam_answer() enforces
-  // started_at + duration independently, so the countdown here is a display.
+  // confirmed. Every tick recomputes remaining time as deadline minus now,
+  // so pausing, closing or reopening the exam can never freeze, extend or
+  // reset the clock. The interval keeps running while paused: reaching zero
+  // auto-submits even mid-pause. The server enforces the same deadline
+  // independently, so this countdown is a display of an unmovable fact.
   useEffect(() => {
-    if (phase !== 'active' || isPaused || timeLeft <= 0) return
+    if (phase !== 'active' || deadlineRef.current <= 0) return
     const id = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          clearInterval(id)
-          setIsTimeExpired(true)
-          return 0
-        }
-        return prev - 1
-      })
+      const remainingMs = deadlineRef.current - Date.now()
+      if (remainingMs <= 0) {
+        clearInterval(id)
+        setTimeLeft(0)
+        setIsTimeExpired(true)
+        return
+      }
+      setTimeLeft(Math.floor(remainingMs / 1000))
     }, 1000)
     return () => clearInterval(id)
-  }, [phase, isPaused, timeLeft])
+  }, [phase])
 
   // ---------------------------------------------------------------
   // 3. Autosave
@@ -606,6 +622,29 @@ export const ExamTakingScreen: React.FC = () => {
     if (isTimeExpired && attempt && !submittingRef.current) void performSubmit()
   }, [isTimeExpired, attempt, performSubmit])
 
+  // Clipboard guard: outside Monaco, copy/cut/paste are blocked and logged
+  // for invigilator review. The code editor itself is exempt so candidates
+  // can always edit code. This never pauses and never touches the timer:
+  // the absolute deadline keeps running regardless.
+  const handleClipboardGuard =
+    (action: 'copy' | 'cut' | 'paste') => (e: React.ClipboardEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target?.closest?.('.monaco-editor')) return
+      e.preventDefault()
+      const now = Date.now()
+      if (now - lastClipboardEventRef.current < 5000) return
+      lastClipboardEventRef.current = now
+      if (!attempt || !examId) return
+      const qid = questions[currentIndex]?.id
+      void logSecurityEvent(
+        attempt.id,
+        examId,
+        `${action}_attempt` as 'copy_attempt',
+        qid,
+        `Clipboard ${action} blocked outside the code editor.`,
+      ).catch(() => undefined)
+    }
+
   // Application-initiated teardown on unmount (navigation away, refresh, the
   // post-submit route change). Marked as cleanup so the resulting exit is never
   // reported as the candidate leaving fullscreen. Flag is set BEFORE the exit.
@@ -775,7 +814,12 @@ export const ExamTakingScreen: React.FC = () => {
   const markedCount = Object.values(markedForReview).filter(Boolean).length
 
   return (
-    <div className="h-screen w-screen overflow-hidden flex flex-col bg-slate-50 font-sans antialiased text-slate-900 select-none">
+    <div
+      className="h-screen w-screen overflow-hidden flex flex-col bg-slate-50 font-sans antialiased text-slate-900 select-none"
+      onCopy={handleClipboardGuard('copy')}
+      onCut={handleClipboardGuard('cut')}
+      onPaste={handleClipboardGuard('paste')}
+    >
       {/* TOP BAR */}
       <header className="h-14 w-full border-b border-slate-200 bg-white px-6 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3 min-w-0">
@@ -874,7 +918,7 @@ export const ExamTakingScreen: React.FC = () => {
 
             <div className="grid grid-cols-2 gap-2 text-xs font-semibold text-slate-600 border-b border-slate-100 pb-3">
               <div className="flex items-center gap-1.5">
-                <span className="h-4 w-4 rounded bg-emerald-600 text-white flex items-center justify-center text-[10px] font-bold">
+                <span className="h-4 w-4 rounded bg-emerald-600 text-white flex items-center justify-center text-2xs font-bold">
                   ✓
                 </span>
                 <span>Answered</span>
@@ -884,7 +928,7 @@ export const ExamTakingScreen: React.FC = () => {
                 <span>Unanswered</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="h-4 w-4 rounded bg-amber-500 text-white flex items-center justify-center text-[10px] font-bold">
+                <span className="h-4 w-4 rounded bg-amber-500 text-white flex items-center justify-center text-2xs font-bold">
                   ★
                 </span>
                 <span>Review</span>

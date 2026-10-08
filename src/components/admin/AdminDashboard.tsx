@@ -1,9 +1,8 @@
 import React, { useCallback } from 'react'
-import { Button } from '../common/Button'
 import { Badge } from '../common/Badge'
+import { Button } from '../common/Button'
 import { Card, CardContent } from '../common/Card'
 import { NotificationBanner } from '../common/NotificationBanner'
-import { RefreshCw } from 'lucide-react'
 import { fetchAdminProfiles } from '../../lib/teacherApi'
 import { useAsyncData } from '../../hooks/useAsyncData'
 
@@ -40,19 +39,19 @@ export const AdminDashboard: React.FC = () => {
             </p>
           </div>
 
-          <Button
-            variant="outline"
-            size="sm"
-            icon={<RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />}
-            onClick={reload}
-            disabled={loading}
-          >
-            Refresh
-          </Button>
         </div>
       </div>
 
-      {error && <NotificationBanner type="error" message={error} onClose={reload} />}
+      {error && (
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="flex-1">
+            <NotificationBanner type="error" message={error} onClose={reload} />
+          </div>
+          <Button variant="outline" size="sm" onClick={reload}>
+            Try Again
+          </Button>
+        </div>
+      )}
 
       <Card>
         <div className="px-5 py-4 border-b border-slate-100">

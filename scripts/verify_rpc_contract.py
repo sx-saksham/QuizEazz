@@ -31,6 +31,10 @@ MIGRATION_ORDER = [
     "migration_10_class_batch_segregation.sql",
     "migration_11_hidden_tests_semantic_grading.sql",
     "migration_12_exam_question_snapshots.sql",
+    "migration_13_publish_now_and_safe_delete.sql",
+    "migration_14_faculty_clear_security_log.sql",
+    "migration_15_archive_flags.sql",
+    "migration_16_results_truth_create_ends_filters.sql",
 ]
 
 CREATE_RE = re.compile(

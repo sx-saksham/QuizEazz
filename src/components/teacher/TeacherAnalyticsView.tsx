@@ -1,11 +1,14 @@
-import React, { useCallback } from 'react'
+import React, { useCallback, useState } from 'react'
 import { Button } from '../common/Button'
 import { Badge } from '../common/Badge'
 import { EmptyState } from '../common/EmptyState'
-import { ShieldAlert, RefreshCw, AlertCircle } from 'lucide-react'
+import { ShieldAlert, AlertCircle } from 'lucide-react'
 import type { SecurityEventRow } from '../../types'
-import { fetchSecurityEvents } from '../../lib/teacherApi'
+import { fetchSecurityEvents, clearSecurityLog } from '../../lib/teacherApi'
 import { useAsyncData } from '../../hooks/useAsyncData'
+import { toErrorMessage } from '../../lib/supabase'
+import { Modal } from '../common/Modal'
+import { NotificationBanner } from '../common/NotificationBanner'
 
 const badgeFor = (type: string) => {
   if (type === 'fullscreen_exit') return 'danger' as const
@@ -23,6 +26,24 @@ export const TeacherAnalyticsView: React.FC = () => {
     [],
     { errorFallback: 'Unable to load the security audit log.' },
   )
+  const [showClear, setShowClear] = useState(false)
+  const [clearBusy, setClearBusy] = useState(false)
+  const [clearError, setClearError] = useState<string | null>(null)
+
+  const handleClearLog = async () => {
+    if (clearBusy) return
+    setClearBusy(true)
+    setClearError(null)
+    try {
+      await clearSecurityLog()
+      setShowClear(false)
+      reload()
+    } catch (err) {
+      setClearError(toErrorMessage(err, 'Unable to clear the security log.'))
+    } finally {
+      setClearBusy(false)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -41,16 +62,69 @@ export const TeacherAnalyticsView: React.FC = () => {
           </p>
         </div>
 
-        <Button
-          variant="outline"
-          size="sm"
-          icon={<RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />}
-          onClick={reload}
-          disabled={loading}
-        >
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setClearError(null)
+              setShowClear(true)
+            }}
+            disabled={loading || events.length === 0}
+          >
+            Clear Log
+          </Button>
+        </div>
       </div>
+
+      {showClear && (
+        <Modal
+          isOpen={showClear}
+          onClose={() => {
+            if (!clearBusy) {
+              setShowClear(false)
+              setClearError(null)
+            }
+          }}
+          title="Clear Security Log"
+          subtitle="This cannot be undone"
+          maxWidth="lg"
+          footer={
+            <div className="flex items-center justify-end gap-2 w-full">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setShowClear(false)
+                  setClearError(null)
+                }}
+                disabled={clearBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => void handleClearLog()}
+                disabled={clearBusy}
+                isLoading={clearBusy}
+              >
+                {clearBusy ? 'Clearing...' : 'Clear All Records'}
+              </Button>
+            </div>
+          }
+        >
+          <div className="space-y-3">
+            <p className="text-xs text-slate-700 leading-relaxed">
+              This permanently removes all {events.length} recorded security event
+              {events.length === 1 ? '' : 's'}. The history cannot be recovered.
+            </p>
+            {clearError && (
+              <NotificationBanner type="error" message={clearError} onClose={() => setClearError(null)} />
+            )}
+          </div>
+        </Modal>
+      )}
 
       <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4 text-xs text-blue-900 flex items-start gap-3">
         <ShieldAlert className="h-5 w-5 text-blue-600 shrink-0 mt-0.5" />
@@ -87,7 +161,7 @@ export const TeacherAnalyticsView: React.FC = () => {
       ) : events.length === 0 ? (
         <EmptyState
           icon={<ShieldAlert className="h-6 w-6 text-slate-400" />}
-          title="No Security Events Recorded"
+          title="No security events recorded."
           description="Objective browser events appear here when a candidate interrupts focus during an assigned examination."
         />
       ) : (

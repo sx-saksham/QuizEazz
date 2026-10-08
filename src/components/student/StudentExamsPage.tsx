@@ -82,13 +82,6 @@ export const StudentExamsPage: React.FC = () => {
             Examinations assigned to you by your department
           </p>
         </div>
-        <button
-          onClick={reload}
-          disabled={loading}
-          className="text-xs font-medium text-slate-500 hover:text-indigo-600 transition-colors disabled:opacity-50"
-        >
-          {loading ? 'Refreshing...' : 'Refresh'}
-        </button>
       </div>
 
       {loading ? (
@@ -127,11 +120,11 @@ export const StudentExamsPage: React.FC = () => {
               >
                 <div className="space-y-3">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-semibold text-slate-500 truncate">
+                    <span className="text-2xs font-semibold text-slate-500 truncate">
                       {exam.description || 'Technical Assessment'}
                     </span>
                     <span
-                      className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded shrink-0 ${meta.className}`}
+                      className={`text-2xs font-bold uppercase tracking-wider px-2 py-0.5 rounded shrink-0 ${meta.className}`}
                     >
                       {meta.label}
                     </span>

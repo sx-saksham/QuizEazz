@@ -1,15 +1,18 @@
 import React, { useCallback, useMemo, useState } from 'react'
 import { Card, CardContent } from '../common/Card'
-import { Button } from '../common/Button'
 import { Badge } from '../common/Badge'
+import { Button } from '../common/Button'
 import { EmptyState } from '../common/EmptyState'
 import { NotificationBanner } from '../common/NotificationBanner'
-import { Users, Search, RefreshCw, AlertCircle } from 'lucide-react'
+import { Users, Search, AlertCircle } from 'lucide-react'
 import { fetchCandidates, type Candidate } from '../../lib/teacherApi'
+import { CLASS_OPTIONS, BATCH_OPTIONS } from '../../lib/cohort'
 import { useAsyncData } from '../../hooks/useAsyncData'
 
 export const TeacherStudentsView: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('')
+  const [classFilter, setClassFilter] = useState<string>('')
+  const [batchFilter, setBatchFilter] = useState<string>('')
 
   // RPC-only. No direct fallback to public.profiles.
   const load = useCallback(() => fetchCandidates(), [])
@@ -21,14 +24,17 @@ export const TeacherStudentsView: React.FC = () => {
 
   const filteredStudents = useMemo(() => {
     const term = searchQuery.trim().toLowerCase()
-    if (!term) return students
-    return students.filter(
-      (s) =>
+    return students.filter((s) => {
+      if (classFilter && s.class_name !== classFilter) return false
+      if (batchFilter && s.batch !== batchFilter) return false
+      if (!term) return true
+      return (
         s.full_name?.toLowerCase().includes(term) ||
         s.email?.toLowerCase().includes(term) ||
-        s.id.toLowerCase().includes(term),
-    )
-  }, [students, searchQuery])
+        s.id.toLowerCase().includes(term)
+      )
+    })
+  }, [students, searchQuery, classFilter, batchFilter])
 
   return (
     <div className="space-y-6">
@@ -41,16 +47,6 @@ export const TeacherStudentsView: React.FC = () => {
             Registered candidate accounts eligible for technical examination assignment
           </p>
         </div>
-
-        <Button
-          variant="outline"
-          size="sm"
-          icon={<RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />}
-          onClick={reload}
-          disabled={loading}
-        >
-          Refresh Roster
-        </Button>
       </div>
 
       {fetchError && (
@@ -58,20 +54,68 @@ export const TeacherStudentsView: React.FC = () => {
       )}
 
       <Card>
-        <CardContent className="p-4 flex items-center justify-between">
-          <div className="relative w-full sm:w-80">
-            <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Search candidate by name..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-            />
+        <CardContent className="p-4 space-y-3">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <div>
+              <label
+                htmlFor="registry-class"
+                className="block text-2xs font-bold uppercase tracking-wider text-slate-500 mb-1"
+              >
+                Class
+              </label>
+              <select
+                id="registry-class"
+                value={classFilter}
+                onChange={(e) => setClassFilter(e.target.value)}
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="">All Classes</option>
+                {CLASS_OPTIONS.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label
+                htmlFor="registry-batch"
+                className="block text-2xs font-bold uppercase tracking-wider text-slate-500 mb-1"
+              >
+                Batch
+              </label>
+              <select
+                id="registry-batch"
+                value={batchFilter}
+                onChange={(e) => setBatchFilter(e.target.value)}
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="">All Batches</option>
+                {BATCH_OPTIONS.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="relative flex-1 sm:self-end">
+              <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search candidate by name..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-4 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+            </div>
           </div>
 
-          <span className="text-xs font-semibold text-slate-500">
-            Total Candidates: {filteredStudents.length}
+          <span className="block text-xs font-semibold text-slate-500">
+            Showing {filteredStudents.length} of {students.length} candidates
+            {classFilter || batchFilter
+              ? ` in ${classFilter || 'all classes'} · ${batchFilter || 'all batches'}`
+              : ''}
+            .
           </span>
         </CardContent>
       </Card>
@@ -88,6 +132,11 @@ export const TeacherStudentsView: React.FC = () => {
           </div>
           <h3 className="text-sm font-semibold text-red-900">Failed to Load Candidates</h3>
           <p className="mt-1 text-xs text-red-600 max-w-md mx-auto">{fetchError}</p>
+          <div className="mt-4">
+            <Button variant="secondary" size="sm" onClick={reload}>
+              Try Again
+            </Button>
+          </div>
         </div>
       ) : filteredStudents.length === 0 ? (
         <EmptyState
@@ -98,14 +147,16 @@ export const TeacherStudentsView: React.FC = () => {
       ) : (
         <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs text-slate-600">
+            <table className="w-full text-left text-xs text-slate-600 table-auto">
               <thead className="bg-slate-50 text-2xs font-semibold uppercase tracking-wider text-slate-500 border-b border-slate-200">
                 <tr>
-                  <th className="py-3 px-4">Candidate Full Name</th>
-                  <th className="py-3 px-4">Institutional Email</th>
-                  <th className="py-3 px-4">Roll / UUID</th>
-                  <th className="py-3 px-4">Role Designation</th>
-                  <th className="py-3 px-4 text-right">Registration Date</th>
+                  <th className="py-3 px-4 min-w-[180px]">Candidate Full Name</th>
+                  <th className="py-3 px-4 min-w-[200px]">Institutional Email</th>
+                  <th className="py-3 px-4">UUID</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Class</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Batch</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Role Designation</th>
+                  <th className="py-3 px-4 text-right whitespace-nowrap">Registration Date</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -119,11 +170,17 @@ export const TeacherStudentsView: React.FC = () => {
                         <span className="truncate">{s.full_name || 'Unnamed'}</span>
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-slate-600 text-xs font-medium">
+                    <td className="py-3 px-4 text-slate-600 text-xs font-medium whitespace-nowrap">
                       {s.email || '—'}
                     </td>
-                    <td className="py-3 px-4 font-mono text-2xs text-slate-500 break-all">{s.id}</td>
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-4 font-mono text-2xs text-slate-500 break-all max-w-[240px]">{s.id}</td>
+                    <td className="py-3 px-4 text-slate-600 text-xs font-medium whitespace-nowrap">
+                      {s.class_name || '—'}
+                    </td>
+                    <td className="py-3 px-4 text-slate-600 text-xs font-medium whitespace-nowrap">
+                      {s.batch || '—'}
+                    </td>
+                    <td className="py-3 px-4 whitespace-nowrap">
                       <Badge variant="default" size="sm">STUDENT</Badge>
                     </td>
                     <td className="py-3 px-4 text-right text-slate-400 text-2xs whitespace-nowrap">

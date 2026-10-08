@@ -53,6 +53,9 @@ export interface AttemptRow {
   exam_title: string
   student_id: string
   student_name: string | null
+  /** Authoritative cohort membership, served for filtering/display. */
+  class_name: string | null
+  batch: string | null
   status: string
   score: number | null
   total_marks: number
@@ -242,6 +245,82 @@ export async function updateExam(payload: ExamUpdate): Promise<Exam> {
   return updated
 }
 
+/**
+ * Deletes a bank question. Succeeds only when nothing references it
+ * (no paper rows, no answers); otherwise the database explains why.
+ */
+export async function deleteQuestion(
+  questionId: string,
+): Promise<{ question_id: string; deleted: boolean; removed_hidden_tests: number }> {
+  return callRpc(
+    () => supabase.rpc('teacher_delete_question', { p_question_id: questionId }),
+    'Unable to delete the question.',
+  )
+}
+
+/**
+ * Archives (hides from active lists) or restores a bank question.
+ * Faculty-only. History (papers, answers, snapshots) is never touched.
+ */
+export async function setQuestionArchived(
+  questionId: string,
+  archived: boolean,
+): Promise<{ question_id: string; is_archived: boolean }> {
+  return callRpc(
+    () =>
+      supabase.rpc('teacher_set_question_archived', {
+        p_question_id: questionId,
+        p_archived: archived,
+      }),
+    archived ? 'Unable to archive the question.' : 'Unable to restore the question.',
+  )
+}
+
+/**
+ * Archives (hides from active lists) or restores an examination.
+ * Faculty-only. Attempts, results and snapshots are never touched.
+ */
+export async function setExamArchived(
+  examId: string,
+  archived: boolean,
+): Promise<{ exam_id: string; is_archived: boolean }> {
+  return callRpc(
+    () =>
+      supabase.rpc('teacher_set_exam_archived', {
+        p_exam_id: examId,
+        p_archived: archived,
+      }),
+    archived ? 'Unable to archive the examination.' : 'Unable to restore the examination.',
+  )
+}
+
+/**
+ * Publishes a draft exam immediately: server clock becomes starts_at,
+ * ends_at derives from duration, snapshots rebuild, paper re-validated.
+ * Rejects already-published/closed exams and invalid papers.
+ */
+export async function publishExamNow(
+  examId: string,
+): Promise<{ exam_id: string; status: string; starts_at: string; ends_at: string; total_questions: number }> {
+  return callRpc(
+    () => supabase.rpc('teacher_publish_now', { p_exam_id: examId }),
+    'Unable to publish the examination.',
+  )
+}
+
+/**
+ * Deletes an examination. Succeeds only when zero attempts exist;
+ * paper and assignment rows cascade, scoped audit rows go with it.
+ */
+export async function deleteExam(
+  examId: string,
+): Promise<{ exam_id: string; title: string; deleted: boolean }> {
+  return callRpc(
+    () => supabase.rpc('teacher_delete_exam', { p_exam_id: examId }),
+    'Unable to delete the examination.',
+  )
+}
+
 export async function fetchExams(): Promise<Exam[]> {
   return callRpc<Exam[]>(
     () => supabase.rpc('teacher_get_exams'),
@@ -255,6 +334,7 @@ export async function createExam(payload: {
   duration_minutes: number
   status: 'draft' | 'published'
   starts_at: string
+  ends_at?: string | null
 }): Promise<Exam> {
   const created = await callRpc<Exam>(
     () =>
@@ -264,6 +344,7 @@ export async function createExam(payload: {
         p_duration_minutes: payload.duration_minutes,
         p_status: payload.status,
         p_starts_at: payload.starts_at,
+        p_ends_at: payload.ends_at ?? null,
       }),
     'Unable to schedule the examination.',
   )
@@ -459,9 +540,18 @@ export async function setExamPaper(
   )
 }
 
-export async function fetchAttempts(examId?: string): Promise<AttemptRow[]> {
+export async function fetchAttempts(
+  examId?: string,
+  filters?: { search?: string; className?: string; batch?: string },
+): Promise<AttemptRow[]> {
   return callRpc<AttemptRow[]>(
-    () => supabase.rpc('teacher_get_attempts', { p_exam_id: examId ?? null }),
+    () =>
+      supabase.rpc('teacher_get_attempts', {
+        p_exam_id: examId ?? null,
+        p_search: filters?.search?.trim() ? filters.search.trim() : null,
+        p_class: filters?.className ? filters.className : null,
+        p_batch: filters?.batch ? filters.batch : null,
+      }),
     'Unable to load candidate submissions.',
   )
 }
@@ -481,6 +571,17 @@ export async function fetchSecurityEvents(examId?: string) {
         p_limit: 300,
       }),
     'Unable to load the security audit log.',
+  )
+}
+
+/**
+ * Permanently clears the security-event audit log. Faculty-only RPC;
+ * students receive Access denied. There is no undo.
+ */
+export async function clearSecurityLog(): Promise<{ cleared: boolean; removed: number }> {
+  return callRpc(
+    () => supabase.rpc('teacher_clear_security_events'),
+    'Unable to clear the security log.',
   )
 }
 
