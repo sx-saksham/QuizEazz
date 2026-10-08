@@ -66,6 +66,59 @@ function json(body: unknown, status = 200): Response {
   })
 }
 
+/**
+ * ===================================================================
+ * OBSERVABILITY
+ * ===================================================================
+ * One structured line per lifecycle event so a stuck attempt can always be
+ * traced to the exact stage that stopped.
+ *
+ * WHAT IS NEVER LOGGED, by construction: the Judge0 API token, the Judge0
+ * submission token, student source code, hidden-test stdin, expected stdout
+ * and the reference solution. This logger only accepts identifiers, an
+ * outcome vocabulary, a status id and a duration, so there is no code path
+ * through which any of that can be emitted.
+ * ===================================================================
+ */
+type GradingSource = 'frontend' | 'sweep'
+
+/**
+ * One row of `quizeazz_list_attempts_needing_programming_grading()`.
+ *
+ * That RPC is `RETURNS TABLE (attempt_id UUID)`, so PostgREST returns it as an
+ * ARRAY OF ROW OBJECTS (`[{ attempt_id: "…" }]`), NOT as an array of bare uuid
+ * strings. Treating the rows themselves as ids made every sweep call
+ * `quizeazz_judge0_pending_answers` with a whole object as `p_attempt_id`,
+ * which Postgres rejects with "invalid input syntax for type uuid" — so the
+ * safety sweep could never grade a single attempt.
+ *
+ * The RPC also documents `SELECT DISTINCT … ORDER BY 1`, so this is the real,
+ * stable contract. `string` stays in the union so a bare-string result keeps
+ * working rather than silently yielding `[object Object]`-style ids.
+ */
+type PendingAttemptRow = { attempt_id: string }
+
+interface GradingLogFields {
+  event: 'grading_start' | 'answer_graded' | 'grading_failed' | 'grading_complete'
+  attemptId: string
+  source: GradingSource
+  answerId?: string
+  outcome?: string | null
+  statusId?: number | null
+  graded?: number
+  pending?: number
+  error?: string
+  durationMs?: number
+}
+
+function logGrading(fields: GradingLogFields): void {
+  try {
+    console.log(`[judge0-grade] ${JSON.stringify(fields)}`)
+  } catch {
+    // Logging must never be able to fail a grading request.
+  }
+}
+
 Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
 
@@ -158,18 +211,45 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     // ---------------------------------------------------------------
     // Sweep mode: retry everything still pending. Used when Judge0 was
-    // unavailable at submission time. Safe to call repeatedly.
+    // unavailable at submission time, or when the browser could not invoke
+    // this function at all. Safe to call repeatedly.
+    //
+    // The candidate list is filtered server-side by submitted_at so a sweep
+    // never competes with the browser's own (much faster) grading run.
     // ---------------------------------------------------------------
     if (payload.sweep === true) {
       if (!isServiceRole) return json({ error: 'sweep requires service role' }, 403)
+      const startedAt = Date.now()
       const { data: attemptIds, error: listErr } = await admin.rpc(
         'quizeazz_list_attempts_needing_programming_grading',
       )
-      if (listErr) return json({ error: `sweep failed: ${listErr.message}` }, 500)
-      const ids = (attemptIds ?? []) as string[]
+      if (listErr) {
+        logGrading({
+          event: 'grading_failed',
+          attemptId: 'sweep',
+          source: 'sweep',
+          error: `sweep failed: ${listErr.message}`,
+        })
+        return json({ error: `sweep failed: ${listErr.message}` }, 500)
+      }
+      // Normalise the row objects into plain uuid strings before grading.
+      // Both shapes are accepted; anything without a usable id is dropped
+      // rather than forwarded to Postgres as a malformed uuid.
+      const ids = (attemptIds ?? [])
+        .map((row: PendingAttemptRow | string) =>
+          typeof row === 'string' ? row : row.attempt_id,
+        )
+        .filter((id): id is string => typeof id === 'string' && id.length > 0)
       const results = await Promise.all(
-        ids.map((id) => gradeAttempt(cfg, admin, id)),
+        ids.map((id) => gradeAttempt(cfg, admin, id, 'sweep')),
       )
+      logGrading({
+        event: 'grading_complete',
+        attemptId: 'sweep',
+        source: 'sweep',
+        graded: ids.length,
+        durationMs: Date.now() - startedAt,
+      })
       return json({ swept: ids.length, results })
     }
 
@@ -202,10 +282,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
       if (!owns) return json({ error: 'attempt does not belong to the caller' }, 403)
     }
 
-    const result = await gradeAttempt(cfg, admin, attemptId)
+    const result = await gradeAttempt(cfg, admin, attemptId, 'frontend')
     return json(result)
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unexpected error'
+    logGrading({
+      event: 'grading_failed',
+      attemptId: 'request',
+      source: isServiceRole ? 'sweep' : 'frontend',
+      error: message,
+    })
     return json({ error: message }, 500)
   }
 })
@@ -223,13 +309,17 @@ async function gradeAttempt(
   cfg: { baseUrl: string; token: string },
   admin: ReturnType<typeof createClient>,
   attemptId: string,
+  source: GradingSource = 'frontend',
 ): Promise<Record<string, unknown>> {
+  const startedAt = Date.now()
   const { data: pending, error: pendingErr } = await admin.rpc(
     'quizeazz_judge0_pending_answers',
     { p_attempt_id: attemptId },
   )
   if (pendingErr) {
-    return { attempt_id: attemptId, ok: false, error: `pending lookup failed: ${pendingErr.message}` }
+    const message = `pending lookup failed: ${pendingErr.message}`
+    logGrading({ event: 'grading_failed', attemptId, source, error: message })
+    return { attempt_id: attemptId, ok: false, error: message }
   }
 
   const rows = (pending ?? []) as Array<{
@@ -246,8 +336,25 @@ async function gradeAttempt(
   }>
 
   if (rows.length === 0) {
+    // Another grader (the browser, or an overlapping sweep) already finished
+    // this attempt. Nothing to do; this is a normal, safe no-op.
+    logGrading({
+      event: 'grading_complete',
+      attemptId,
+      source,
+      graded: 0,
+      pending: 0,
+      durationMs: Date.now() - startedAt,
+    })
     return { attempt_id: attemptId, ok: true, graded: 0, note: 'nothing pending' }
   }
+
+  logGrading({
+    event: 'grading_start',
+    attemptId,
+    source,
+    pending: rows.length,
+  })
 
   const graded: Array<Record<string, unknown>> = []
 
@@ -336,6 +443,15 @@ async function gradeAttempt(
       cases: usableCases,
     })
     if (!caseRun.ok) {
+      // Transport failure or poll deadline. NOT a verdict: the answer stays
+      // 'Pending Evaluation' and is retried by the next sweep.
+      logGrading({
+        event: 'grading_failed',
+        attemptId,
+        answerId: row.answer_id,
+        source,
+        error: caseRun.transportError,
+      })
       graded.push({
         answer_id: row.answer_id,
         outcome: null,
@@ -360,6 +476,17 @@ async function gradeAttempt(
       message: `Hidden tests passed: ${caseRun.passedCases}/${caseRun.totalCases}`,
     })
 
+    // Identifiers and the verdict vocabulary only — never the token, the code,
+    // the stdin or the expected output.
+    logGrading({
+      event: 'answer_graded',
+      attemptId,
+      answerId: row.answer_id,
+      source,
+      outcome: caseRun.outcome,
+      statusId: caseRun.statusId,
+    })
+
     graded.push({
       answer_id: row.answer_id,
       outcome: caseRun.outcome,
@@ -373,6 +500,17 @@ async function gradeAttempt(
   // Recompute the attempt totals now that programming verdicts landed.
   const { error: finalizeErr } = await admin.rpc('quizeazz_finalize_attempt_grading', {
     p_attempt_id: attemptId,
+  })
+
+  const stillPending = graded.filter((g) => (g as { pending?: boolean }).pending).length
+  logGrading({
+    event: finalizeErr ? 'grading_failed' : 'grading_complete',
+    attemptId,
+    source,
+    graded: graded.length - stillPending,
+    pending: stillPending,
+    durationMs: Date.now() - startedAt,
+    ...(finalizeErr ? { error: `finalize failed: ${finalizeErr.message}` } : {}),
   })
 
   return {

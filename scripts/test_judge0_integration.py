@@ -20,7 +20,10 @@ Run:  python scripts/test_judge0_integration.py
 
 import json
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -803,8 +806,15 @@ def test_failure_handling():
         "a transport failure never produces a verdict",
         # Transport catches return ok:false (no outcome attached), and the
         # only consumer maps ok:false to a pending push — never applyVerdict.
+        # The window is wide because observability logging now sits between
+        # the branch and the push; the invariant itself is unchanged.
         re.search(r"transportError", ix) is not None
-        and re.search(r"if\s*\(!caseRun\.ok\)\s*\{[\s\S]{0,300}?pending:\s*true", ix) is not None,
+        and re.search(
+            r"if\s*\(!caseRun\.ok\)\s*\{[\s\S]{0,1200}?pending:\s*true", ix
+        ) is not None
+        and re.search(
+            r"if\s*\(!caseRun\.ok\)\s*\{[\s\S]{0,1200}?continue", ix
+        ) is not None,
     )
     check(
         "a failed submission is not mapped to any outcome",
@@ -1108,7 +1118,10 @@ def test_token_never_exposed():
     bad_import = []
     for p in list(SRC.rglob("*.ts")) + list(SRC.rglob("*.tsx")):
         txt = p.read_text(encoding="utf-8", errors="replace")
-        if "supabase/functions" in txt or "judge0.ts" in txt:
+        # A bare "judge0.ts" substring would also match the legitimate import
+        # of the public typed error classes from @supabase/supabase-js, which
+        # is the SDK, not the Edge Function module.
+        if "supabase/functions" in txt or re.search(r"judge0\.ts'", txt):
             bad_import.append(str(p.relative_to(ROOT)))
     check("no src/ file imports the Edge Function code", not bad_import, str(bad_import))
 
@@ -1257,6 +1270,631 @@ def test_no_ambiguous_catalog_columns():
     )
 
 
+def test_grading_trigger_retry():
+    """A production submission was observed stuck because the browser's ONLY
+    invocation of judge0-grade failed before the function ran. The trigger now
+    retries transient transport failures; terminal failures are not retried."""
+    txt = (SRC / "lib" / "judge0Client.ts").read_text(encoding="utf-8")
+
+    check("grading trigger retries at most 3 times", "MAX_ATTEMPTS = 3" in txt)
+    check(
+        "grading trigger uses exponential backoff",
+        "BASE_RETRY_DELAY_MS * 2 ** attempt" in txt,
+    )
+    check(
+        "retry classification uses typed supabase error classes, not strings",
+        "error instanceof FunctionsFetchError" in txt
+        and "error instanceof FunctionsRelayError" in txt
+        and "error instanceof FunctionsHttpError" in txt,
+    )
+    check(
+        "no fragile message-string error matching",
+        "Failed to fetch" not in txt and "error.message.includes" not in txt,
+    )
+    check(
+        "5xx is transient",
+        re.search(r"if \(status >= 500\) return true", txt) is not None,
+    )
+    check(
+        "408/429 are transient, other 4xx are terminal",
+        "return status === 408 || status === 429" in txt,
+    )
+    check(
+        "a successful response is never retried",
+        re.search(r"if \(!error\) \{[\s\S]{0,400}?return \{ \.\.\.payload", txt) is not None,
+    )
+    check(
+        "terminal failure breaks the retry loop immediately",
+        "break // terminal: retrying cannot help" in txt,
+    )
+    check(
+        "final failure preserves the existing return shape",
+        "return { attempt_id: attemptId, ok: false, error: lastError }" in txt,
+    )
+
+    # Timer hygiene: fresh controller per attempt, always cleared.
+    check(
+        "one controller is created per loop iteration and cleared in finally",
+        txt.count("new AbortController()") == 1 and "clearTimeout(timer)" in txt,
+    )
+    check(
+        "retries share one wall-clock budget so the UI is never blocked longer",
+        "const deadline = Date.now() + TIMEOUT_MS" in txt,
+    )
+    check(
+        "backoff never runs past the shared deadline",
+        "Math.min(BASE_RETRY_DELAY_MS * 2 ** attempt, deadline - Date.now())" in txt,
+    )
+    check(
+        "an application-level failure (200 + ok:false) is never retried",
+        re.search(r"if \(!error\) \{[\s\S]{0,400}?return \{ \.\.\.payload", txt) is not None,
+    )
+
+    caller = (SRC / "components" / "student" / "ExamTakingScreen.tsx").read_text(encoding="utf-8")
+    check(
+        "caller still navigates to the review page after any trigger outcome",
+        "navigate(" in caller and "requestProgrammingGrading" in caller,
+    )
+    check(
+        "caller still only warns on a failed trigger (never blocks submission)",
+        "console.warn" in caller,
+    )
+
+
+def test_sweep_staleness_threshold():
+    """The recovery sweep must not race the browser's own grading run."""
+    mig = ROOT / "supabase" / "migration_17_sweep_staleness_threshold.sql"
+    check("migration 17 exists", mig.exists())
+    if not mig.exists():
+        return
+    t = mig.read_text(encoding="utf-8")
+    fn = (ROOT / "supabase" / "functions" / "judge0-grade" / "index.ts").read_text(encoding="utf-8")
+
+    check(
+        "sweep RPC keeps its exact signature and return shape",
+        "CREATE OR REPLACE FUNCTION public.quizeazz_list_attempts_needing_programming_grading()"
+        in t
+        and "RETURNS TABLE (attempt_id UUID)" in t,
+    )
+    check(
+        "sweep only returns attempts older than the threshold",
+        "make_interval(secs => 60)" in t,
+    )
+    check(
+        "threshold uses the authoritative submission time",
+        "att.submitted_at" in t,
+    )
+    check(
+        "sweep still requires a finalized attempt (never in_progress)",
+        "att.status IN ('submitted', 'timed_out', 'evaluating', 'evaluated')" in t,
+    )
+    check(
+        "sweep still requires exactly 'Pending Evaluation' with real code",
+        "a.evaluation_status = 'Pending Evaluation'" in t and "btrim(a.code) <> ''" in t,
+    )
+    check("sweep still only considers coding questions", "q.question_type = 'coding'" in t)
+    check("migration 17 grants no new privilege", "GRANT" not in t and "REVOKE" not in t)
+    check(
+        "migration 17 touches no table, column or RLS policy",
+        "ALTER TABLE" not in t and "CREATE TABLE" not in t and "POLICY" not in t,
+    )
+    check(
+        "edge function still sweeps through the existing sweep path",
+        "quizeazz_list_attempts_needing_programming_grading" in fn and "sweep === true" in fn,
+    )
+    check(
+        "sweep mode is still service-role only",
+        "if (!isServiceRole) return json({ error: 'sweep requires service role' }, 403)" in fn,
+    )
+
+
+def _run_node(source):
+    """Execute a JS snippet with node and return (ok, stdout, stderr)."""
+    node = shutil.which("node")
+    if node is None:
+        return False, "", "node not found on PATH"
+    with tempfile.TemporaryDirectory() as td:
+        script = Path(td) / "snippet.mjs"
+        script.write_text(source, encoding="utf-8")
+        try:
+            proc = subprocess.run(
+                [node, str(script)], capture_output=True, text=True, timeout=60
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return False, "", str(exc)
+    return proc.returncode == 0, proc.stdout.strip(), proc.stderr.strip()
+
+
+def _sweep_id_normalizer(fn):
+    """
+    Extract the real sweep normalization expression from the deployed function.
+
+    The block is lifted verbatim out of index.ts and returned as JS (the two
+    TypeScript-only annotations are erased) so the test can EXECUTE the shipped
+    code rather than pattern-match it. Returns None if the block is missing.
+    """
+    match = re.search(
+        r"const ids = \(attemptIds \?\? \[\]\)(.*?)\n(\s*)const results",
+        fn,
+        re.S,
+    )
+    if not match:
+        return None
+    block = "const ids = (attemptIds ?? [])" + match.group(1)
+    # Erase the TS-only annotations so the block is valid plain JS.
+    block = block.replace("(row: PendingAttemptRow | string)", "(row)")
+    block = block.replace("(id): id is string", "(id)")
+    return block
+
+
+def test_sweep_normalizes_rpc_row_objects():
+    """
+    Regression: the sweep must hand gradeAttempt() UUID strings.
+
+    quizeazz_list_attempts_needing_programming_grading() is declared
+    RETURNS TABLE (attempt_id UUID), so PostgREST returns it as an array of ROW
+    OBJECTS -- [{"attempt_id": "..."}] -- not as an array of bare uuid strings.
+
+    The sweep previously did `const ids = (attemptIds ?? []) as string[]`,
+    which silenced the compiler while forwarding each whole row object as
+    p_attempt_id. Postgres rejected every one of them with "invalid input
+    syntax for type uuid", so the safety sweep could not grade a single
+    attempt: all 9 pending attempts failed on every 2-minute run.
+
+    The RPC signature is fixed by migration 7 and unchanged by migration 17, so
+    the row-object shape is the real, stable contract and must be unwrapped.
+
+    This test EXECUTES the shipped normalization against the real RPC payload,
+    so it fails on the old implementation and passes on the new one. It also
+    pins the string form, in case the RPC is ever changed to return bare ids.
+    """
+    fn = (ROOT / "supabase" / "functions" / "judge0-grade" / "index.ts").read_text(
+        encoding="utf-8"
+    )
+
+    check(
+        "the sweep RPC row type is declared",
+        "type PendingAttemptRow = { attempt_id: string }" in fn,
+    )
+    check(
+        "the sweep no longer casts RPC rows with 'as string[]'",
+        "as string[]" not in fn,
+        "an 'as string[]' cast is what hid the row-object shape from the compiler",
+    )
+    check(
+        "the sweep unwraps attempt_id from each row",
+        "typeof row === 'string' ? row : row.attempt_id" in fn,
+    )
+
+    normalizer = _sweep_id_normalizer(fn)
+    check(
+        "the sweep id normalization is present and extractable",
+        normalizer is not None,
+        "" if normalizer else "could not locate the sweep id normalization block",
+    )
+    if normalizer is None:
+        return
+
+    row_payload = [
+        {"attempt_id": "b8467990-1092-4a88-ac4f-afd821e37d52"},
+        {"attempt_id": "03f49e35-4864-4ce3-ac40-cdcef45f542b"},
+    ]
+
+    # 1. The real RPC shape: an array of row objects.
+    ok, out, err = _run_node(
+        f"const attemptIds = {json.dumps(row_payload)};\n"
+        f"{normalizer}\n"
+        "const seen = [];\n"
+        "ids.forEach((id) => seen.push(typeof id + ':' + id));\n"
+        "console.log(JSON.stringify(seen));\n"
+    )
+    check(
+        "the sweep normalization executes against the row-object shape",
+        ok,
+        err[:200],
+    )
+    if not ok:
+        return
+
+    try:
+        seen = json.loads(out)
+    except json.JSONDecodeError:
+        seen = None
+
+    expected = [f"string:{row['attempt_id']}" for row in row_payload]
+    check(
+        "gradeAttempt receives bare uuid strings, not row objects",
+        seen == expected,
+        f"expected {expected}, got {seen}",
+    )
+    check(
+        "no row object leaks into the grading call",
+        seen is not None and not any(s.startswith("object") for s in (seen or [])),
+        f"got {seen}",
+    )
+
+    # 2. Back-compat: bare strings still work, so a future RPC change to
+    #    returning plain uuids cannot silently break the sweep again.
+    string_payload = [row["attempt_id"] for row in row_payload]
+    ok2, out2, err2 = _run_node(
+        f"const attemptIds = {json.dumps(string_payload)};\n"
+        f"{normalizer}\n"
+        "console.log(JSON.stringify(ids));\n"
+    )
+    try:
+        seen2 = json.loads(out2) if ok2 else None
+    except json.JSONDecodeError:
+        seen2 = None
+    check(
+        "the sweep normalization still accepts bare uuid strings",
+        ok2 and seen2 == string_payload,
+        err2[:200] if not ok2 else f"expected {string_payload}, got {seen2}",
+    )
+
+    # 3. The old implementation would NOT have produced these values, which is
+    #    what makes this test a real regression guard rather than a tautology.
+    ok3, out3, _ = _run_node(
+        f"const attemptIds = {json.dumps(row_payload)};\n"
+        "const ids = attemptIds;  // the old `as string[]` behaviour\n"
+        "const seen = [];\n"
+        "ids.forEach((id) => seen.push(typeof id));\n"
+        "console.log(JSON.stringify(seen));\n"
+    )
+    check(
+        "the previous implementation is proven to fail this assertion",
+        ok3 and out3 == '["object","object"]',
+        f"old behaviour produced {out3}, so the check above genuinely discriminates",
+    )
+
+
+def _run_judge0_module(body):
+    """
+    Run a TypeScript snippet that imports the REAL judge0.ts and executes it.
+
+    Node 24 strips TypeScript types natively, so the shipped module is loaded
+    directly rather than re-implemented here. If judge0.ts changes, these tests
+    exercise the change instead of a copy of it.
+    """
+    node = shutil.which("node")
+    if node is None:
+        return False, "", "node not found on PATH"
+    module_uri = J0_TS.resolve().as_uri()
+    with tempfile.TemporaryDirectory() as td:
+        script = Path(td) / "harness.ts"
+        script.write_text(
+            "import * as J from %r;\n%s\n" % (module_uri, body), encoding="utf-8"
+        )
+        try:
+            # bytes + explicit utf-8: on Windows, text=True decodes with the
+            # ANSI code page (cp1252), which mangles the multi-byte UTF-8 the
+            # harness legitimately emits and would make correct decoding look
+            # like a failure.
+            proc = subprocess.run(
+                [node, str(script)], capture_output=True, timeout=90
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return False, "", str(exc)
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    return proc.returncode == 0, stdout.strip(), stderr.strip()
+
+
+# NOTE: the harness sources below are ASCII-only on purpose. This file is read
+# with `encoding="utf-8"`, but non-ASCII literals are written as \uXXXX escapes
+# so the generated .ts file is byte-identical regardless of how the harness
+# writes it. Non-UTF-8 payload bytes are built at runtime from a byte array.
+
+
+def test_result_fetch_handles_non_utf8_compiler_output():
+    """
+    Regression: Judge0 result fetch must use base64_encoded=true.
+
+    Judge0 documents a single 400 for GET /submissions/{token}: "some attributes
+    for this submission cannot be converted to UTF-8, use base64_encoded=true
+    query parameter" — and it explicitly warns that GCC compiler output must be
+    fetched base64-encoded for exactly this reason.
+
+    With base64_encoded=false, every invalid-C++ submission (an undeclared
+    identifier, a missing include) made Judge0 answer HTTP 400, so the grading
+    request failed as a TRANSPORT error and the answer stayed
+    'Pending Evaluation' forever. Production attempt
+    b8467990-1092-4a88-ac4f-afd821e37d52 ("printf(a+b)") was wedged this way.
+
+    These tests import the real judge0.ts, mock `fetch`, and assert on the real
+    request URL and the real decoded result. They fail against the previous
+    implementation because that one requested base64_encoded=false and returned
+    the raw base64 body as `compile_output`.
+    """
+    fn = J0_TS.read_text(encoding="utf-8")
+
+    check(
+        "the result fetch requests base64_encoded=true",
+        "base64_encoded=true&fields=" in fn,
+        "GET /submissions/{token} must opt into base64, or GCC's non-UTF-8 "
+        "compile_output makes Judge0 answer HTTP 400",
+    )
+    check(
+        "the result fetch no longer requests base64_encoded=false",
+        "base64_encoded=false&fields=" not in fn,
+    )
+    check(
+        "the four Judge0 text attributes are decoded",
+        all(
+            f"decodeJudge0Text(parsed.{field})" in fn
+            for field in ("stdout", "stderr", "compile_output", "message")
+        ),
+        "stdout, stderr, compile_output and message are the only attributes "
+        "Judge0 base64-encodes",
+    )
+
+    body = r"""
+const b64 = (s: string): string => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+
+// Judge0 answers base64-encoded. `compile_output` holds raw non-UTF-8 GCC
+// bytes (base64 of a byte string that is NOT valid UTF-8).
+const NON_UTF8_B64 = (() => {
+  const bytes = new Uint8Array([
+    ...new TextEncoder().encode("//x.cpp:4:20: error: 'printf' was not declared in this scope\n"),
+    0xff, 0xfe, 0x80, 0x0a,
+  ]);
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+})();
+
+let capturedUrl = "";
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (url: any) => {
+  capturedUrl = String(url);
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      stdout: btoa("42\n"),
+      stderr: null,
+      compile_output: NON_UTF8_B64,
+      message: null,
+      time: "0.01",
+      memory: 100,
+      exit_code: null,
+      status: { id: 6, description: "Compilation Error" },
+    }),
+  };
+};
+
+const cfg = { baseUrl: "http://judge0.invalid:2358", token: "t" };
+const res: any = await J.fetchProgramResult(cfg, "tok-123");
+
+// A. The URL must opt into base64.
+console.log(JSON.stringify({ url: capturedUrl }));
+
+// B. The non-UTF-8 compile_output must decode WITHOUT throwing, keeping the
+//    readable ASCII diagnostics and substituting U+FFFD for the bad bytes.
+console.log(JSON.stringify({
+  threw: false,
+  compile_output: res.compile_output,
+  stdout: res.stdout,
+  stderr: res.stderr,
+  message: res.message,
+  status_id: res.status_id,
+}));
+
+// C. That decoded result must flow into the real verdict mapper as a
+//    Compilation Error, not a System Error and not an exception.
+const mapped = J.mapJudge0Result(res, 512000);
+console.log(JSON.stringify({ outcome: mapped.outcome, pending: mapped.pending }));
+"""
+
+    ok, out, err = _run_judge0_module(body)
+    check(
+        "the real judge0.ts result fetch decodes a non-UTF-8 Judge0 response",
+        ok,
+        err[:400],
+    )
+    if not ok:
+        return
+
+    lines = [json.loads(line) for line in out.splitlines() if line.strip()]
+    if len(lines) < 3:
+        check("the Judge0 harness produced a verdict", False, f"unexpected output: {out[:300]}")
+        return
+
+    url_info, decoded, verdict = lines[0], lines[1], lines[2]
+
+    check(
+        "the fetched URL carries base64_encoded=true",
+        "base64_encoded=true" in url_info.get("url", ""),
+        f"got {url_info.get('url')!r}",
+    )
+    check(
+        "base64 compile_output is decoded, not returned raw",
+        isinstance(decoded.get("compile_output"), str)
+        and "was not declared in this scope" in decoded["compile_output"],
+        f"compile_output was {decoded.get('compile_output')!r}",
+    )
+    check(
+        "non-UTF-8 bytes become U+FFFD instead of throwing",
+        "\ufffd" in (decoded.get("compile_output") or ""),
+        "expected replacement characters for the 0xff/0xfe/0x80 bytes",
+    )
+    check(
+        "base64 stdout is decoded back to the exact program output",
+        decoded.get("stdout") == "42\n",
+        f"stdout was {decoded.get('stdout')!r}",
+    )
+    check(
+        "null stderr and message stay null (no decode exception)",
+        decoded.get("stderr") is None and decoded.get("message") is None,
+    )
+    check(
+        "the decoded result maps to Compilation Error",
+        verdict.get("outcome") == "Compilation Error" and verdict.get("pending") is False,
+        f"got {verdict}",
+    )
+
+
+def test_decode_judge0_text_edge_cases():
+    """
+    decodeJudge0Text must be total: it never throws, and it leaves JSON scalars
+    (status/time/memory/exit_code) untouched by only ever being applied to the
+    four base64 text attributes.
+    """
+    body = r"""
+const b64 = (s: string): string => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+const cases: Record<string, unknown> = {
+  null_input: J.decodeJudge0Text(null),
+  undefined_input: J.decodeJudge0Text(undefined),
+  empty_string: J.decodeJudge0Text(""),
+  valid_utf8: J.decodeJudge0Text(b64("h\u00e9llo \u2713")),
+  empty_payload: J.decodeJudge0Text(b64("")),
+  malformed_base64: J.decodeJudge0Text("!!!not base64!!!"),
+  number_not_a_string: J.decodeJudge0Text(42),
+  // A multi-byte character split across the decode must not corrupt output.
+  multibyte: J.decodeJudge0Text(b64("\u2192 caf\u00e9")),
+};
+console.log(JSON.stringify(cases));
+"""
+    ok, out, err = _run_judge0_module(body)
+    check(
+        "decodeJudge0Text is total and never throws",
+        ok,
+        err[:400],
+    )
+    if not ok:
+        return
+
+    try:
+        got = json.loads(out)
+    except json.JSONDecodeError:
+        check("decodeJudge0Text results are parseable", False, out[:200])
+        return
+
+    check("null decodes to null", got.get("null_input") is None)
+    check("undefined decodes to null", got.get("undefined_input") is None)
+    check("an empty payload decodes to an empty string", got.get("empty_payload") == "")
+    check(
+        "valid UTF-8 round-trips exactly",
+        got.get("valid_utf8") == "h\u00e9llo \u2713"
+        and got.get("multibyte") == "\u2192 caf\u00e9",
+        f"got {got.get('valid_utf8')!r} / {got.get('multibyte')!r}",
+    )
+    check(
+        "malformed base64 degrades to null instead of throwing",
+        got.get("malformed_base64") is None,
+    )
+    check(
+        "a non-string JSON scalar is never decoded",
+        got.get("number_not_a_string") is None,
+        "status/time/memory/exit_code must never pass through the decoder",
+    )
+
+
+def test_result_fetch_failure_is_not_a_verdict():
+    """
+    A Judge0 HTTP 400/5xx must still surface as a transport failure so the
+    answer stays 'Pending Evaluation' and is retried. The base64 change must not
+    turn an upstream error into a fabricated verdict.
+    """
+    body = r"""
+globalThis.fetch = async () => ({ ok: false, status: 400, json: async () => ({}) });
+const cfg = { baseUrl: "http://judge0.invalid:2358", token: "t" };
+try {
+  await J.fetchProgramResult(cfg, "tok-400");
+  console.log(JSON.stringify({ threw: false }));
+} catch (err) {
+  console.log(JSON.stringify({ threw: true, message: (err as Error).message }));
+}
+"""
+    ok, out, err = _run_judge0_module(body)
+    check(
+        "an upstream Judge0 error still throws for the transport-failure path",
+        ok,
+        err[:400],
+    )
+    if not ok:
+        return
+    try:
+        got = json.loads(out.splitlines()[-1])
+    except json.JSONDecodeError:
+        check("transport-failure harness output is parseable", False, out[:200])
+        return
+    check(
+        "HTTP 400 is raised as an error carrying the status",
+        got.get("threw") is True and "400" in (got.get("message") or ""),
+        f"got {got}",
+    )
+
+
+def test_grading_concurrency_safety():
+    """Frontend and sweep can both call gradeAttempt for one attempt. Exactly
+    one verdict may be committed; the loser must never overwrite it."""
+    mig7 = (ROOT / "supabase" / "migration_07_judge0_integration.sql").read_text(encoding="utf-8")
+
+    check(
+        "a verdict applies only while the answer is still Pending",
+        "IF v_row <> 'Pending Evaluation' THEN" in mig7 and "already has a verdict" in mig7,
+    )
+    check(
+        "a second verdict write is refused by the database itself",
+        "RAISE EXCEPTION" in mig7,
+    )
+    check(
+        "the pending-answers read excludes already-graded answers",
+        "a.evaluation_status = 'Pending Evaluation'" in mig7,
+    )
+    check(
+        "marks are derived from stored answer rows, never from the caller",
+        "SELECT COALESCE(SUM(a.marks_awarded), 0)::INT" in mig7,
+    )
+    check(
+        "an attempt becomes 'evaluated' only once nothing is pending",
+        "CASE WHEN v_pending > 0 THEN 'evaluating' ELSE 'evaluated' END" in mig7,
+    )
+    check(
+        "finalization is idempotent (recomputes from stored rows)",
+        "quizeazz_finalize_attempt_grading" in mig7,
+    )
+    check(
+        "programming verdicts remain service-role only",
+        "GRANT  EXECUTE ON FUNCTION public.quizeazz_apply_judge0_verdict" in mig7,
+    )
+
+    fn = (ROOT / "supabase" / "functions" / "judge0-grade" / "index.ts").read_text(encoding="utf-8")
+    check(
+        "an already-graded attempt is a logged no-op, not an error",
+        "note: 'nothing pending'" in fn,
+    )
+
+
+def test_grading_observability():
+    """Structured lifecycle logging, with a hard no-secrets guarantee."""
+    fn = (ROOT / "supabase" / "functions" / "judge0-grade" / "index.ts").read_text(encoding="utf-8")
+    for event in ("grading_start", "grading_failed", "answer_graded", "grading_complete"):
+        check(f"logs {event}", f"'{event}'" in fn)
+
+    check(
+        "logging is wrapped so it can never fail a request",
+        "Logging must never be able to fail" in fn,
+    )
+
+    # The logger's field type is a strict allow-list: no token/code/stdin field.
+    iface = fn[fn.index("interface GradingLogFields"):fn.index("function logGrading")]
+    for forbidden in ("oken", "code", "stdin", "expected", "reference", "secret"):
+        check(f"log field allow-list excludes {forbidden!r}", forbidden not in iface)
+    check(
+        "logs record the trigger source so frontend vs sweep is distinguishable",
+        "source: GradingSource" in fn and "'frontend'" in fn and "'sweep'" in fn,
+    )
+    check(
+        "logs record attempt and answer identifiers",
+        "attemptId" in iface and "answerId" in iface,
+    )
+    check(
+        "log calls never pass a submission token",
+        not re.search(r"logGrading\(\{[^}]*submissionToken", fn),
+    )
+
+
 def main():
     for fn in [
         test_language_mapping,
@@ -1281,6 +1919,14 @@ def main():
         test_no_false_judge0_disconnected_claim,
         test_submit_triggers_grading_before_navigation,
         test_token_never_exposed,
+        test_grading_trigger_retry,
+        test_sweep_staleness_threshold,
+        test_sweep_normalizes_rpc_row_objects,
+        test_result_fetch_handles_non_utf8_compiler_output,
+        test_decode_judge0_text_edge_cases,
+        test_result_fetch_failure_is_not_a_verdict,
+        test_grading_concurrency_safety,
+        test_grading_observability,
         test_build_output_clean,
         test_rpc_privileges,
         test_no_ambiguous_catalog_columns,

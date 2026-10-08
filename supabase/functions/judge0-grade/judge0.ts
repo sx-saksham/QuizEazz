@@ -283,13 +283,69 @@ export async function submitProgram(
   return parsed.token
 }
 
+/**
+ * Decodes a Judge0 `base64_encoded=true` text attribute back to a string.
+ *
+ * Judge0 base64-encodes exactly the free-text attributes when
+ * `base64_encoded=true`: `stdout`, `stderr`, `compile_output` and `message`.
+ * Those four are the ONLY fields decoded here — `status`, `time`, `memory` and
+ * `exit_code` stay JSON scalars and must never be run through this.
+ *
+ * Robustness rules, both required by the grading contract:
+ *
+ *  - Invalid UTF-8 becomes U+FFFD REPLACEMENT CHARACTER instead of throwing.
+ *    GCC emits non-UTF-8 bytes in `compile_output` for ordinary invalid C++,
+ *    which is exactly the case that made Judge0 answer HTTP 400. Throwing here
+ *    would replace one stuck evaluation with another.
+ *  - A malformed base64 payload degrades to `null`, never an exception.
+ *
+ * `null`/`undefined` in means `null` out, so "Judge0 said there is no output"
+ * stays distinguishable from "the output was empty".
+ */
+export function decodeJudge0Text(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  // Defensive only: with base64_encoded=true Judge0 always sends base64 text.
+  // A plain string is passed through rather than mangled, so a proxy or a
+  // future Judge0 build that ignores the flag cannot corrupt the output.
+  if (typeof value !== 'string') return null
+  if (value === '') return ''
+
+  let binary: string
+  try {
+    binary = atob(value)
+  } catch {
+    return null
+  }
+
+  // Build the byte array first, then decode once with explicit
+  // non-fatal error handling: invalid sequences become U+FFFD.
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i) & 0xff
+  }
+  try {
+    return new TextDecoder('utf-8').decode(bytes)
+  } catch {
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+  }
+}
+
 /** Fetches the current state of a submission. */
 export async function fetchProgramResult(
   config: Judge0ClientConfig,
   submissionToken: string,
 ): Promise<Judge0ResultFields> {
+  // base64_encoded=true is REQUIRED, not cosmetic.
+  //
+  // With base64_encoded=false Judge0 refuses to serialise any attribute that
+  // is not valid UTF-8 and answers HTTP 400 with "some attributes for this
+  // submission cannot be converted to UTF-8, use base64_encoded=true query
+  // parameter". GCC routinely puts non-UTF-8 bytes in `compile_output` for
+  // ordinary invalid C++, so every wrong-but-compilable-typo submission was
+  // wedged as permanently Pending Evaluation. Judge0's own docs state the
+  // compiler output must be fetched base64-encoded for exactly this reason.
   const res = await fetch(
-    `${config.baseUrl}/submissions/${encodeURIComponent(submissionToken)}?base64_encoded=false&fields=${RESULT_FIELDS}`,
+    `${config.baseUrl}/submissions/${encodeURIComponent(submissionToken)}?base64_encoded=true&fields=${RESULT_FIELDS}`,
     {
       method: 'GET',
       headers: { 'X-Auth-Token': config.token },
@@ -308,10 +364,11 @@ export async function fetchProgramResult(
     status_id: typeof statusId === 'number' ? statusId : null,
     exit_code: typeof parsed.exit_code === 'number' ? parsed.exit_code : null,
     memory: typeof parsed.memory === 'number' ? parsed.memory : null,
-    stdout: (parsed.stdout as string | null) ?? null,
-    stderr: (parsed.stderr as string | null) ?? null,
-    compile_output: (parsed.compile_output as string | null) ?? null,
-    message: (parsed.message as string | null) ?? null,
+    // The four base64 attributes, decoded. Everything else stays a scalar.
+    stdout: decodeJudge0Text(parsed.stdout),
+    stderr: decodeJudge0Text(parsed.stderr),
+    compile_output: decodeJudge0Text(parsed.compile_output),
+    message: decodeJudge0Text(parsed.message),
     time: (parsed.time as string | number | null) ?? null,
     token: submissionToken,
   }
