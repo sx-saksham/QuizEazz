@@ -1895,6 +1895,834 @@ def test_grading_observability():
     )
 
 
+def test_verdict_row_lock_p1():
+    """
+    Migration 20 must make "one verdict per answer" a real guarantee.
+
+    The guard SELECT in quizeazz_apply_judge0_verdict read
+    answers.evaluation_status WITHOUT a lock. Under READ COMMITTED two
+    concurrent graders can both read 'Pending Evaluation'; the second
+    UPDATE then blocks, re-checks a WHERE clause that still matches
+    (id/attempt_id are immutable), and overwrites the committed verdict.
+
+    Concurrent graders are reachable: a browser-triggered invocation keeps
+    running server-side to the 150s Edge limit after the browser gives up
+    at 45s, while the 60s sweep guard can already have claimed the same
+    attempt; pg_cron also fires every 2 minutes without waiting.
+    """
+    mig = ROOT / "supabase" / "migration_20_verdict_row_lock.sql"
+    check("migration 20 exists", mig.exists())
+    if not mig.exists():
+        return
+    t = mig.read_text(encoding="utf-8")
+    body = strip_sql_comments(t)
+
+    check(
+        "migration 20 redefines the verdict writer with CREATE OR REPLACE",
+        "CREATE OR REPLACE FUNCTION public.quizeazz_apply_judge0_verdict(" in t,
+    )
+    check(
+        "migration 20 keeps the exact parameter list",
+        all(
+            f"p_{n} {ty}" in t
+            for n, ty in [
+                ("attempt_id", "UUID"),
+                ("answer_id", "UUID"),
+                ("submission_token", "TEXT"),
+                ("outcome", "TEXT"),
+                ("status_id", "INT"),
+                ("exit_code", "INT"),
+                ("memory", "INT"),
+                ("time", "NUMERIC"),
+                ("stdout", "TEXT"),
+                ("stderr", "TEXT"),
+                ("compile_output", "TEXT"),
+                ("message", "TEXT"),
+            ]
+        ),
+    )
+    check(
+        "return type, volatility surface and search_path are unchanged",
+        "RETURNS BOOLEAN" in t
+        and "LANGUAGE plpgsql" in t
+        and "SECURITY DEFINER" in t
+        and "SET search_path = public, pg_temp" in t,
+    )
+
+    # --- the actual safeguard -------------------------------------------------
+    guard = re.search(
+        r"SELECT a\.evaluation_status INTO v_current_status(.*?);", body, re.S
+    )
+    check("the guard SELECT is present", guard is not None)
+    if guard:
+        g = guard.group(1)
+        check(
+            "the guard SELECT locks the answer row (FOR UPDATE)",
+            re.search(r"FOR\s+UPDATE\s*$", g.strip(), re.I) is not None,
+            f"guard clause was: {g.strip()!r}",
+        )
+        check(
+            "the lock is taken on answers, not on a joined table",
+            "a.id = p_answer_id" in g and "FROM public.answers a" in g,
+        )
+    check(
+        "FOR UPDATE is applied exactly once in the whole function",
+        len(re.findall(r"FOR\s+UPDATE", body, re.I)) == 1,
+    )
+
+    # --- the trap this migration must NOT fall into --------------------------
+    upd = re.search(r"UPDATE public\.answers a(.*?);", body, re.S)
+    check("the verdict UPDATE is present", upd is not None)
+    if upd:
+        where = upd.group(1)
+        check(
+            "the UPDATE predicate is still keyed only on id + attempt_id",
+            "a.id = p_answer_id" in where and "a.attempt_id = p_attempt_id" in where,
+        )
+        check(
+            "the UPDATE did NOT gain an evaluation_status predicate "
+            "(that would silently match 0 rows while still returning TRUE)",
+            not re.search(r"evaluation_status\s*=\s*'Pending Evaluation'", where),
+            "a status predicate requires an explicit ROW_COUNT check; "
+            "without it a losing grader would get applied:true and no error",
+        )
+
+    # --- behaviour that must not drift ---------------------------------------
+    check(
+        "the existing 'already has a verdict' refusal is preserved verbatim",
+        "already has a verdict" in body
+        and re.search(
+            r"IF v_current_status <> 'Pending Evaluation' THEN", body
+        )
+        is not None,
+    )
+    check(
+        "the deleted-answer refusal is preserved (FOR UPDATE can return no row)",
+        re.search(r"IF v_current_status IS NULL THEN", body) is not None,
+    )
+    check(
+        "the in-progress refusal is preserved",
+        "the examination is still in progress" in body,
+    )
+    allow = re.search(r"IF p_outcome IS NULL OR p_outcome NOT IN \((.*?)\)", body, re.S)
+    outcomes = re.findall(r"'([^']+)'", allow.group(1)) if allow else []
+    check(
+        "the outcome allow-list is exactly the 8 objective verdicts "
+        "('Pending Evaluation' must NOT be accepted as an outcome)",
+        outcomes
+        == [
+            "Correct",
+            "Wrong Answer",
+            "Compilation Error",
+            "Runtime Error",
+            "Time Limit Exceeded",
+            "Memory Limit Exceeded",
+            "System Error",
+            "Not Attempted",
+        ],
+        f"got {outcomes}",
+    )
+    check(
+        "marks are still computed in SQL, never accepted from the caller",
+        "quizeazz_marks_for_outcome(p_outcome, v_marks_total)" in body,
+    )
+    seg = _verdict_body("migration_20_verdict_row_lock.sql")
+    if seg and seg[-1] == "$$;":
+        seg = seg[:-1]
+    check(
+        "the function still returns TRUE on success, as its last statement",
+        len(seg) >= 2
+        and seg[-2].strip() == "RETURN TRUE;"
+        and seg[-1].strip() == "END;",
+        f"ended with {seg[-3:]!r}",
+    )
+    check(
+        "the anti-tamper authoritative flag is still set before the write",
+        "set_config('quizeazz.authoritative_context', 'true', true)" in body,
+    )
+    check(
+        "the student's source code is still never written by this function",
+        "code =" not in body and "language =" not in body,
+    )
+
+    # --- blast radius ---------------------------------------------------------
+    check("migration 20 grants no new privilege", "GRANT" not in t and "REVOKE" not in t)
+    check(
+        "migration 20 touches no table, column or RLS policy",
+        "ALTER TABLE" not in t and "CREATE TABLE" not in t and "POLICY" not in t,
+    )
+    check(
+        "migration 20 creates no function other than the one it replaces",
+        len(re.findall(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION", t, re.I)) == 1,
+    )
+    check(
+        "migration 20 drops nothing (no earlier migration is re-run or undone)",
+        "DROP " not in t.upper(),
+    )
+    check(
+        "migration 20 differs from the deployed body by FOR UPDATE alone",
+        _migration20_delta_is_lock_only(),
+    )
+
+
+def strip_sql_comments(text: str) -> str:
+    """Remove `--` line comments so assertions cannot match the prose."""
+    out = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("--"):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+VERDICT_MARKER = "CREATE OR REPLACE FUNCTION public.quizeazz_apply_judge0_verdict("
+
+
+def _verdict_body(fname):
+    """Comment-stripped source of one definition of the verdict writer."""
+    text = (ROOT / "supabase" / fname).read_text(encoding="utf-8")
+    i = text.index(VERDICT_MARKER)
+    seg = text[i : text.index("$$;", i) + 3]
+    return [ln.rstrip() for ln in strip_sql_comments(seg).splitlines() if ln.strip()]
+
+
+def _migration20_delta_is_lock_only():
+    """
+    The strongest guard against an accidental behaviour change.
+
+    Migration 09 is the definition currently deployed, so migration 20's
+    function body must differ from it by exactly one added FOR UPDATE and
+    nothing else - no signature, no logic, no return-semantics drift.
+    """
+    import difflib
+
+    try:
+        before = _verdict_body("migration_09_cpp_only_and_verdict_fix.sql")
+        after = _verdict_body("migration_20_verdict_row_lock.sql")
+    except (ValueError, OSError):
+        return False
+
+    delta = [
+        ln
+        for ln in difflib.unified_diff(before, after, n=0)
+        if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))
+    ]
+    removed = [x for x in delta if x.startswith("-")]
+    added = [x for x in delta if x.startswith("+")]
+    lock_lines = [x for x in added if "FOR UPDATE" in x]
+    # the only tolerated removal is the re-terminated statement the lock joins
+    tolerated = [x for x in removed if x.strip() == "-  WHERE a.id = p_answer_id;"]
+    return (
+        len(lock_lines) == 1
+        and len(added) == 2
+        and len(removed) == len(tolerated)
+        and len(removed) <= 1
+    )
+
+
+def _sweep_wave_loop(fn):
+    """
+    Extract the real sweep wave loop out of index.ts as plain JS.
+
+    Same approach as _sweep_id_normalizer: lift the shipped code so the test
+    EXECUTES it rather than pattern-matching it. The two TypeScript-only
+    annotations inside the block are erased.
+    """
+    match = re.search(
+        r"const results: Array<Record<string, unknown>> = \[\](.*?)"
+        r"const deferred = ids\.length - started",
+        fn,
+        re.S,
+    )
+    if not match:
+        return None
+    block = "const results = []" + match.group(1)
+    block = block.replace(": Array<Record<string, unknown>>", "")
+    block = block.replace(": string[]", "")
+    return block
+
+
+def _sweep_constants(fn):
+    """Return (budget_expr, concurrency_expr, attempt_budget_expr) from index.ts."""
+    b = re.search(r"const SWEEP_BUDGET_MS = ([\d_]+)", fn)
+    c = re.search(r"const SWEEP_CONCURRENCY = (\d+)", fn)
+    a = re.search(r"const GRADING_ATTEMPT_BUDGET_MS = ([\d_]+)", fn)
+    return (
+        b.group(1) if b else None,
+        c.group(1) if c else None,
+        a.group(1) if a else None,
+    )
+
+
+def test_sweep_budget_p2():
+    """
+    The sweep must be bounded by WALL-CLOCK TIME, not by attempt count.
+
+    A 75-student production load test lost 21 invocations to the 150s Edge
+    Function limit: 75 attempts x 5 hidden cases = 375 Judge0 submissions at
+    ~2.63/sec is ~143s of pure Judge0 time before any poll latency.
+
+    A fixed batch size cannot fix this, because the cost unit is
+    SUBMISSIONS not attempts. The publication gate requires only one
+    validated hidden test and caps neither cases-per-question nor
+    coding-questions-per-paper, so any attempt count can map to an
+    unbounded number of submissions.
+    """
+    fn = (FUNCS / "index.ts").read_text(encoding="utf-8")
+    budget, conc, attempt_budget = _sweep_constants(fn)
+
+    check("sweep budget constant exists", budget is not None)
+    check("sweep concurrency constant exists", conc is not None)
+    check("per-attempt budget constant exists", attempt_budget is not None)
+    check("sweep budget is 110000 ms (40s margin below the 150s wall)",
+          budget == "110_000", f"found {budget}")
+    check("sweep concurrency is 10", conc == "10", f"found {conc}")
+    check("per-attempt budget is 90000 ms (inside the sweep budget)",
+          attempt_budget == "90_000", f"found {attempt_budget}")
+
+    check(
+        "the unbounded fan-out is gone",
+        "Promise.all(\n        ids.map(" not in fn
+        and "ids.map((id) => gradeAttempt(cfg, admin, id, 'sweep'))" not in fn,
+    )
+    check(
+        "sweep grades in waves bounded by SWEEP_CONCURRENCY",
+        re.search(
+            r"for \(let i = 0; i < ids\.length; i \+= SWEEP_CONCURRENCY\)", fn
+        )
+        is not None,
+    )
+    check(
+        "the deadline is checked before each attempt is admitted to a wave",
+        re.search(
+            r"while \(wave\.length < SWEEP_CONCURRENCY.*?"
+            r"if \(Date\.now\(\) >= sweepDeadline\)",
+            fn,
+            re.S,
+        )
+        is not None,
+    )
+    check(
+        "an exhausted budget stops claiming new attempts",
+        "budgetExhausted = true" in fn and "if (budgetExhausted) break" in fn,
+    )
+    check(
+        "unfinished work is reported as deferred, not discarded",
+        "const deferred = ids.length - started" in fn and "deferred," in fn,
+    )
+    check(
+        "the response keeps its existing 'swept' field",
+        "swept: ids.length" in fn,
+    )
+    check(
+        "the sweep still runs through the same RPC and 60s staleness guard",
+        "quizeazz_list_attempts_needing_programming_grading" in fn
+        and "sweep === true" in fn,
+    )
+    check(
+        "sweep mode is still service-role only",
+        "if (!isServiceRole) return json({ error: 'sweep requires service role' }, 403)"
+        in fn,
+    )
+    check(
+        "the sweep still grades via gradeAttempt with source 'sweep'",
+        re.search(
+            r"gradeAttempt\(cfg, admin, id, 'sweep', waveDeadline\)", fn
+        )
+        is not None,
+    )
+
+    loop = _sweep_wave_loop(fn)
+    check("the wave loop could be extracted for execution", loop is not None)
+    if loop is None:
+        return
+
+    def harness(n_ids, budget_ms, cost_ms, concurrency=10, attempt_budget=10_000_000):
+        """Run the REAL loop against a virtual clock and a mock grader."""
+        ids = [f"attempt-{i:03d}" for i in range(n_ids)]
+        return f"""
+const SWEEP_BUDGET_MS = {budget_ms}
+const SWEEP_CONCURRENCY = {concurrency}
+const GRADING_ATTEMPT_BUDGET_MS = {attempt_budget}
+const ids = {json.dumps(ids)}
+const cfg = {{}}, admin = {{}}
+let startedAt = 0
+
+// Virtual clock: each graded attempt costs `cost_ms`.
+let now = 0
+Date.now = () => now
+
+let inflight = 0, maxInflight = 0
+const order = []
+const deadlines = []
+const gradeAttempt = async (cfg, admin, id, source, deadlineAt) => {{
+  inflight++
+  if (inflight > maxInflight) maxInflight = inflight
+  order.push(id)
+  deadlines.push(deadlineAt === undefined ? null : deadlineAt)
+  await new Promise((r) => setTimeout(r, 0))
+  now += {cost_ms}
+  inflight--
+  return {{ attempt_id: id, ok: true }}
+}}
+
+{loop}
+
+const deferredFinal = ids.length - started
+console.log(JSON.stringify({{
+  started, deferred: deferredFinal, failed, budgetExhausted,
+  results: results.length, maxInflight, order, deadlines,
+}}))
+"""
+
+    # --- behavioural: concurrency is capped ----------------------------------
+    budget_for_test = 0 + 10_000_000  # startedAt(=0) + SWEEP_BUDGET_MS in harness
+    ok, out, err = _run_node(harness(25, 10_000_000, 1))
+    check("wave loop executes (all work, no deadline)", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "a full sweep grades every attempt when budget allows",
+            r["started"] == 25 and r["deferred"] == 0,
+            f"started={r['started']} deferred={r['deferred']}",
+        )
+        check(
+            "concurrency never exceeds SWEEP_CONCURRENCY",
+            r["maxInflight"] <= 10,
+            f"max in-flight was {r['maxInflight']}",
+        )
+        check(
+            "concurrency actually reaches the cap (waves really are parallel)",
+            r["maxInflight"] == 10,
+            f"max in-flight was {r['maxInflight']}",
+        )
+        check(
+            "every result is returned, so nothing graded is lost",
+            r["results"] == 25,
+        )
+        check(
+            "attempts are processed in list order",
+            r["order"] == [f"attempt-{i:03d}" for i in range(25)],
+        )
+        check(
+            "every attempt is given a deadline no later than the sweep deadline",
+            all(d is not None and d <= budget_for_test for d in r["deadlines"]),
+            f"deadlines={r['deadlines'][:3]}",
+        )
+
+    # --- behavioural: the deadline stops new work ----------------------------
+    # NOTE: the virtual clock advances once per GRADED ATTEMPT, so a wave of
+    # 10 concurrent attempts at cost_ms=50 advances it by 500ms, not 50ms.
+    #   wave 1 (10 attempts) -> now = 500ms; next wave sees 500 >= 60 and
+    #   refuses to start anything.
+    ok, out, err = _run_node(harness(25, 60, 50))
+    check("deadline path executes", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "an exhausted budget stops new attempts",
+            r["budgetExhausted"] is True,
+        )
+        check(
+            "work past the deadline is deferred, not started",
+            r["started"] == 10 and r["deferred"] == 15,
+            f"started={r['started']} deferred={r['deferred']}",
+        )
+        check(
+            "deferred work is exactly what was NOT started (recoverable)",
+            r["results"] == r["started"],
+            f"results={r['results']} started={r['started']}",
+        )
+        check(
+            "the deadline never lets a partial wave count as started",
+            r["started"] % 10 == 0,
+        )
+
+    # --- behavioural: the deadline is honoured mid-sweep, not just at the end
+    # 45 attempts, 5ms each => 50ms per wave. Budget 120ms allows three waves.
+    #   waves 1-3 run (now 50, 100, 150); wave 4 sees 150 >= 120 and stops.
+    ok, out, err = _run_node(harness(45, 120, 5))
+    check("multi-wave deadline path executes", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "the sweep stops partway through a large backlog",
+            r["started"] == 30 and r["deferred"] == 15,
+            f"started={r['started']} deferred={r['deferred']}",
+        )
+        check(
+            "work completed before the deadline is fully reported",
+            r["results"] == 30,
+            f"results={r['results']}",
+        )
+        check(
+            "the sweep returns well inside the 150s wall (virtual 150ms)",
+            r["budgetExhausted"] is True,
+        )
+
+    # --- behavioural: a budget of zero starts nothing ------------------------
+    ok, out, err = _run_node(harness(25, 0, 1))
+    check("zero-budget path executes", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "a zero budget grades nothing and defers everything",
+            r["started"] == 0 and r["deferred"] == 25,
+            f"started={r['started']} deferred={r['deferred']}",
+        )
+        check(
+            "a zero budget still returns cleanly rather than throwing",
+            r["results"] == 0,
+        )
+
+    # --- behavioural: an empty backlog is a clean no-op ----------------------
+    ok, out, err = _run_node(harness(0, 60, 50))
+    check("empty-backlog path executes", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "an empty sweep is a clean no-op",
+            r["started"] == 0 and r["deferred"] == 0 and r["results"] == 0,
+        )
+
+
+def test_sweep_failure_isolation_p4():
+    """
+    One failed attempt must not stop the others, and every attempt must
+    carry a real deadline.
+
+    Previously the wave used `Promise.all`, so a single rejecting
+    gradeAttempt rejected the whole wave: the other nine attempts' results
+    were DISCARDED even though they had completed, and no later wave ever
+    started. Worse, because attempts in a wave run concurrently, a wave's
+    length is its slowest member - one attempt whose Judge0 cases each burn
+    the full 30s poll budget could hold the wave open past the 150s Edge
+    wall and kill the invocation.
+
+    Separate from P1 (row lock) and P3 (error handler) on purpose.
+    """
+    fn = (FUNCS / "index.ts").read_text(encoding="utf-8")
+    j0 = (FUNCS / "judge0.ts").read_text(encoding="utf-8")
+
+    check(
+        "the sweep uses allSettled, so one rejection cannot abandon the wave",
+        "await Promise.allSettled(" in fn
+        and "wave.map((id) => gradeAttempt(cfg, admin, id, 'sweep', waveDeadline))"
+        in fn,
+    )
+    check(
+        "a plain Promise.all over the wave is gone",
+        not re.search(
+            r"const waveResults = await Promise\.all\(\s*wave\.map", fn
+        ),
+    )
+    check(
+        "fulfilled results are still collected",
+        re.search(r"if \(s\.status === 'fulfilled'\) \{\s*results\.push", fn) is not None,
+    )
+    check(
+        "a rejected attempt is counted and logged, never silently dropped",
+        "failed += 1" in fn and "attempt raised:" in fn,
+    )
+    check(
+        "the rejection log carries no token or source code",
+        re.search(
+            r"attempt raised:[^`]*\$\{[^}]*\.message", fn, re.S
+        )
+        is not None,
+    )
+    check(
+        "failures are reported in the response",
+        "failed," in fn and "graded: started - failed" in fn,
+    )
+
+    # --- per-attempt deadline -----------------------------------------------
+    check(
+        "gradeAttempt accepts a deadline",
+        re.search(
+            r"async function gradeAttempt\([\s\S]*?deadlineAt: number \| null = null,", fn
+        )
+        is not None,
+    )
+    check(
+        "the sweep computes one deadline per wave as the MIN of both limits",
+        re.search(
+            r"Math\.min\(\s*Date\.now\(\) \+ GRADING_ATTEMPT_BUDGET_MS,\s*sweepDeadline,?\s*\)",
+            fn,
+        )
+        is not None,
+        "an attempt must never be allowed to outlive the budget that admitted it",
+    )
+    check(
+        "the sweep deadline is derived from the sweep start",
+        "const sweepDeadline = startedAt + SWEEP_BUDGET_MS" in fn,
+    )
+    check(
+        "the answer loop stops when its own deadline is spent",
+        re.search(
+            r"for \(const row of rows\) \{[\s\S]*?if \(deadlineAt !== null && Date\.now\(\) >= deadlineAt\) \{[\s\S]*?break\b",
+            fn,
+        )
+        is not None,
+    )
+    check(
+        "the deadline reaching a hidden-test case is NOT a verdict",
+        "transportError: 'grading deadline reached'" in fn
+        and "ok: false" in fn,
+    )
+    check(
+        "the deadline is forwarded into the per-case poll",
+        "deadlineAt," in fn and "runHiddenTests(cfg, {" in fn,
+    )
+    check(
+        "pollUntilVerdict honours an optional absolute deadline",
+        "deadlineAt?: number | null" in j0
+        and "if (deadlineAt !== null && Date.now() >= deadlineAt) break" in j0,
+    )
+    check(
+        "the poll sleep is clipped so it cannot overshoot the deadline",
+        re.search(r"Math\.min\(opts\.delayMs, deadlineAt - Date\.now\(\)\)", j0)
+        is not None,
+    )
+    check(
+        "an exhausted deadline still finalizes the attempt",
+        "finalization runs even after a deadline break" in fn.lower()
+        or "quizeazz_finalize_attempt_grading" in fn,
+    )
+    check(
+        "answers never reached are still counted as pending",
+        "deadlineHit ? rows.length - graded.length : 0" in fn,
+    )
+    check(
+        "the per-attempt deadline is observable in the result",
+        "deadline_exhausted: deadlineHit" in fn,
+    )
+
+    # --- browser-triggered grading is deliberately unaffected ----------------
+    check(
+        "frontend grading still calls gradeAttempt with no deadline "
+        "(browser behaviour unchanged)",
+        "gradeAttempt(cfg, admin, attemptId, 'frontend')" in fn,
+    )
+    check(
+        "reference validation is not given a deadline either",
+        fn.count("deadlineAt: input.deadlineAt") == 0,
+    )
+
+    loop = _sweep_wave_loop(fn)
+    check("the wave loop could be extracted for execution", loop is not None)
+    if loop is None:
+        return
+
+    def isolation_harness(n_ids, throw_ids, budget_ms=10_000_000, cost_ms=1):
+        ids = [f"attempt-{i:03d}" for i in range(n_ids)]
+        throw_list = json.dumps(throw_ids)
+        return f"""
+const SWEEP_BUDGET_MS = {budget_ms};
+const SWEEP_CONCURRENCY = 10;
+const GRADING_ATTEMPT_BUDGET_MS = 10_000_000;
+const ids = {json.dumps(ids)};
+const throwIds = new Set({throw_list});
+const cfg = {{}}, admin = {{}};
+let startedAt = 0;
+let now = 0;
+Date.now = () => now;
+const logGrading = () => {{}};
+const completed = [];
+const gradeAttempt = async (cfg, admin, id) => {{
+  await new Promise((r) => setTimeout(r, 0));
+  if (throwIds.has(id)) throw new Error('boom ' + id);
+  now += {cost_ms};
+  completed.push(id);
+  return {{ attempt_id: id, ok: true }};
+}};
+{loop}
+console.log(JSON.stringify({{
+  started, failed, deferred: ids.length - started,
+  results: results.length, completed: completed.length,
+  budgetExhausted,
+}}));
+"""
+
+    # --- one attempt in wave 1 throws ---------------------------------------
+    ok, out, err = _run_node(isolation_harness(25, ["attempt-003"]))
+    check("isolation path executes", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "a single failing attempt does not stop the sweep",
+            r["deferred"] == 0 and r["started"] == 25,
+            f"started={r['started']} deferred={r['deferred']}",
+        )
+        check(
+            "the failure is counted, not swallowed",
+            r["failed"] == 1,
+            f"failed={r['failed']}",
+        )
+        check(
+            "every OTHER attempt still completes and is reported",
+            r["completed"] == 24 and r["results"] == 24,
+            f"completed={r['completed']} results={r['results']}",
+        )
+
+    # --- several attempts across several waves fail -------------------------
+    ok, out, err = _run_node(
+        isolation_harness(25, ["attempt-000", "attempt-012", "attempt-024"])
+    )
+    check("multi-wave isolation path executes", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "failures spread across waves do not halt later waves",
+            r["started"] == 25 and r["deferred"] == 0,
+            f"started={r['started']} deferred={r['deferred']}",
+        )
+        check(
+            "every failure is counted",
+            r["failed"] == 3,
+            f"failed={r['failed']}",
+        )
+        check(
+            "the surviving attempts all complete",
+            r["completed"] == 22 and r["results"] == 22,
+            f"completed={r['completed']} results={r['results']}",
+        )
+
+    # --- every attempt fails: still a clean, fully-accounted sweep ----------
+    ok, out, err = _run_node(isolation_harness(10, [f"attempt-{i:03d}" for i in range(10)]))
+    check("total-failure path executes", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "a fully failing wave is reported, not thrown",
+            r["failed"] == 10 and r["results"] == 0 and r["deferred"] == 0,
+            f"failed={r['failed']} results={r['results']}",
+        )
+
+
+def test_error_handler_scope_p3():
+    """
+    The catch handler must be able to read isServiceRole.
+
+    `catch` is a SIBLING block of `try`, so a `const` declared inside `try`
+    is not in scope there. The handler read `isServiceRole` when logging a
+    failure, which threw a ReferenceError from INSIDE the error handler:
+    the intended JSON 500 never returned, the real error message was lost,
+    and a grading failure became an opaque platform failure.
+
+    Separate from P1/P2 on purpose - this is a pre-existing defect that was
+    already visible as TS2304 at HEAD, not something either change caused.
+    """
+    fn = (FUNCS / "index.ts").read_text(encoding="utf-8")
+
+    handler = fn[fn.index("Deno.serve(") :]
+    try_open = handler.index("try {")
+    catch_at = handler.index("} catch (err) {")
+    catch_end = handler.index("\n})", catch_at)
+    try_block = handler[try_open:catch_at]
+    catch_block = handler[catch_at:catch_end]
+
+    check(
+        "the catch handler really does reference isServiceRole",
+        "isServiceRole" in catch_block,
+    )
+
+    # The declaration must appear BEFORE the try, i.e. in handler scope.
+    decl = re.search(
+        r"^\s*(let|var)\s+isServiceRole\b", handler[:try_open], re.M
+    )
+    check(
+        "isServiceRole is declared before the try block, so catch can read it",
+        decl is not None,
+        "a `const isServiceRole` inside `try` is invisible to the sibling catch",
+    )
+    check(
+        "no `const isServiceRole` still shadows it inside the try block",
+        not re.search(r"\bconst\s+isServiceRole\b", try_block),
+    )
+    check(
+        "isServiceRole is assigned inside the try block (unchanged logic)",
+        re.search(r"^\s*isServiceRole\s*=\s*!!serviceRoleKey && bearer === serviceRoleKey", try_block, re.M)
+        is not None,
+    )
+    check(
+        "the flag is still initialised to false so an early throw is safe",
+        re.search(r"\blet\s+isServiceRole\s*=\s*false", handler[:try_open]) is not None,
+    )
+    check(
+        "the catch handler still returns the intended JSON 500",
+        "return json({ error: message }, 500)" in catch_block,
+    )
+    check(
+        "the error message is still never echoed with a token",
+        "submissionToken" not in catch_block and "JUDGE0_API_TOKEN" not in catch_block,
+    )
+
+    # --- behavioural: prove the scoping rule the fix relies on --------------
+    probe = """
+let threw = null;
+function handler(fix) {
+  const scope = fix
+    ? "let isServiceRole = false;"
+    : "";                       // fix=false: nothing declared in handler scope
+  return new Function(`
+    ${scope}
+    return async function run() {
+      try {
+        ${fix ? "isServiceRole = true;" : "const isServiceRole = true;"}
+        throw new Error('boom');
+      } catch (err) {
+        return isServiceRole ? 'sweep' : 'frontend';
+      }
+    };
+  `)();
+}
+(async () => {
+  const a = {};
+  const bad = await handler(false).call(a);
+  const good = await handler(true).call(a);
+  console.log(JSON.stringify({ bad, good }));
+})();
+"""
+    # The unfixed shape must THROW; the fixed shape must return a label.
+    unfixed = """
+function run() {
+  try {
+    const isServiceRole = true;
+    throw new Error('boom');
+  } catch (err) {
+    return isServiceRole ? 'sweep' : 'frontend';
+  }
+}
+try { console.log(JSON.stringify({ out: run() })); }
+catch (e) { console.log(JSON.stringify({ threw: e.constructor.name })); }
+"""
+    fixed = unfixed.replace(
+        "  try {\n    const isServiceRole = true;",
+        "let isServiceRole = false;\n  try {\n    isServiceRole = true;",
+    )
+    ok, out, err = _run_node(unfixed)
+    check("the pre-fix scoping shape is reproduced", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "a binding declared inside `try` is genuinely invisible to `catch` "
+            "(this is the bug)",
+            r.get("threw") == "ReferenceError",
+            f"got {r}",
+        )
+    ok, out, err = _run_node(fixed)
+    check("the corrected scoping shape executes", ok, err)
+    if ok:
+        r = json.loads(out)
+        check(
+            "hoisting the declaration lets the handler read the flag",
+            r.get("out") == "sweep",
+            f"got {r}",
+        )
+
+
 def main():
     for fn in [
         test_language_mapping,
@@ -1926,6 +2754,10 @@ def main():
         test_decode_judge0_text_edge_cases,
         test_result_fetch_failure_is_not_a_verdict,
         test_grading_concurrency_safety,
+        test_verdict_row_lock_p1,
+        test_sweep_budget_p2,
+        test_sweep_failure_isolation_p4,
+        test_error_handler_scope_p3,
         test_grading_observability,
         test_build_output_clean,
         test_rpc_privileges,

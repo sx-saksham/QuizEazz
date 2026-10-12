@@ -8,9 +8,26 @@ parenthesis balance, and plpgsql block balance (END IF / END LOOP / END CASE
 are distinguished from a bare block END).
 
 Read-only. Run:  python scripts/verify_rpc_contract.py
+
+The default run is fully offline: it compares src/ against the migration
+FILES. That is not sufficient on its own, because a migration file can be
+committed and even merge-tested without ever being applied to the live
+database -- the suite would go green while production still ran the old
+body.
+
+Pass --deployed to additionally read the LIVE function definitions from
+pg_proc and check the deployed state directly:
+
+    python scripts/verify_rpc_contract.py --deployed
+
+That mode issues read-only SELECTs only. It never writes, never migrates
+and never touches production data.
 """
 
+import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,6 +55,7 @@ MIGRATION_ORDER = [
     "migration_17_sweep_staleness_threshold.sql",
     "migration_18_realtime_security_log.sql",
     "migration_19_clear_security_events_explicit_where.sql",
+    "migration_20_verdict_row_lock.sql",
 ]
 
 CREATE_RE = re.compile(
@@ -279,9 +297,147 @@ def load_frontend_calls():
     return calls
 
 
+# ------------------------------------------------ deployed (live) functions
+
+def _run_linked_select(sql: str):
+    """Run ONE read-only SELECT against the linked project. Returns rows."""
+    # On Windows npx is a .cmd shim, so resolve it rather than assuming.
+    npx = shutil.which("npx") or shutil.which("npx.cmd")
+    if npx is None:
+        return None, "npx not found on PATH"
+    try:
+        proc = subprocess.run(
+            [npx, "supabase", "db", "query", "--linked", sql],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=str(ROOT),
+            shell=os.name == "nt",
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return None, str(exc)
+    if proc.returncode != 0:
+        return None, (proc.stderr or proc.stdout or "").strip()
+    payload = proc.stdout[proc.stdout.find("{") :] if "{" in proc.stdout else proc.stdout
+    try:
+        import json
+
+        return json.loads(payload).get("rows", []), None
+    except (ValueError, AttributeError) as exc:
+        return None, f"unparseable response: {exc}"
+
+
+def deployed_function_checks():
+    """
+    Verify the LIVE database, not the migration files.
+
+    Everything the offline pass checks is derived from source text. This
+    pass asks the database itself what it is actually running, which is the
+    only way to catch "the migration was written but never applied".
+    """
+    print("\n--- deployed state (--deployed) ---")
+    failures = 0
+
+    rows, err = _run_linked_select(
+        "SELECT p.proname, p.prosrc FROM pg_proc p "
+        "JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname = 'public' AND p.proname IN "
+        "('quizeazz_apply_judge0_verdict',"
+        "'quizeazz_list_attempts_needing_programming_grading');"
+    )
+    if err or rows is None:
+        print("  FAIL  could not read live function definitions")
+        print(f"        {err}")
+        return 1
+    live = {r["proname"]: r["prosrc"] for r in rows}
+
+    mig20 = SQL / "migration_20_verdict_row_lock.sql"
+    mig20_exists = mig20.exists()
+    mig20_text = mig20.read_text(encoding="utf-8") if mig20_exists else ""
+
+    src = live.get("quizeazz_apply_judge0_verdict")
+    if src is None:
+        print("  FAIL  quizeazz_apply_judge0_verdict is absent from the live database")
+        return 1
+
+    # --- P1: is the row lock actually live? ---------------------------------
+    live_locked = bool(
+        re.search(
+            r"SELECT a\.evaluation_status INTO \w+.*?FOR UPDATE",
+            src,
+            re.S | re.I,
+        )
+    )
+    if live_locked:
+        print("  ok    live quizeazz_apply_judge0_verdict guards with FOR UPDATE")
+    elif mig20_exists:
+        print("  FAIL  live verdict writer has NO row lock, but")
+        print("        migration_20_verdict_row_lock.sql exists in the repo")
+        print("        -> the safeguard is NOT deployed. Apply migration 20.")
+        failures += 1
+    else:
+        print("  FAIL  live verdict writer has NO row lock and no migration defines one")
+        failures += 1
+
+    if mig20_exists:
+        guard = re.search(
+            r"SELECT a\.evaluation_status INTO \w+(.*?);",
+            strip_line_comments(mig20_text),
+            re.S,
+        )
+        if guard and re.search(r"FOR\s+UPDATE\s*$", guard.group(1).strip(), re.I):
+            print("  ok    migration 20 source carries FOR UPDATE on the guard SELECT")
+        else:
+            print("  FAIL  migration 20 source no longer carries FOR UPDATE")
+            failures += 1
+
+    # --- the trap migration 20 must not fall into ---------------------------
+    upd = re.search(r"UPDATE public\.answers a(.*?);", src, re.S)
+    if upd and re.search(r"evaluation_status\s*=\s*'Pending Evaluation'", upd.group(1)):
+        print("  FAIL  live verdict UPDATE carries an evaluation_status predicate")
+        print("        without a ROW_COUNT check it returns TRUE while updating 0 rows")
+        failures += 1
+
+    # --- behaviour that must not drift -------------------------------------
+    for label, needle in [
+        ("refuses a verdict on an in-progress attempt", "still in progress"),
+        ("refuses to overwrite an existing verdict", "already has a verdict"),
+        ("refuses an unknown outcome", "Refusing to apply an unknown outcome"),
+        ("computes marks in SQL", "quizeazz_marks_for_outcome"),
+    ]:
+        if needle in src:
+            print(f"  ok    live verdict writer {label}")
+        else:
+            print(f"  FAIL  live verdict writer no longer {label}")
+            failures += 1
+
+    # --- the ACL must never have widened ------------------------------------
+    rows, err = _run_linked_select(
+        "SELECT has_function_privilege('anon', p.oid, 'EXECUTE') AS anon, "
+        "has_function_privilege('authenticated', p.oid, 'EXECUTE') AS auth, "
+        "has_function_privilege('service_role', p.oid, 'EXECUTE') AS svc "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname = 'public' AND p.proname = 'quizeazz_apply_judge0_verdict';"
+    )
+    if err or not rows:
+        print("  FAIL  could not read the live verdict-writer ACL")
+        print(f"        {err}")
+        failures += 1
+    else:
+        a = rows[0]
+        if a["anon"] is False and a["auth"] is False and a["svc"] is True:
+            print("  ok    live verdict writer ACL is service_role only")
+        else:
+            print(f"  FAIL  live verdict writer ACL changed: {a}")
+            failures += 1
+
+    return failures
+
+
 # ---------------------------------------------------------------------- main
 
 def main():
+    check_deployed = "--deployed" in sys.argv
     print("=" * 74)
     print("QuizEazz  ·  RPC contract + SQL structure verification")
     print("=" * 74)
@@ -346,11 +502,23 @@ def main():
     for n in sorted(set(fns) - called - internal):
         print(f"  note  {n}  (defined in SQL, not called from src/)")
 
+    deployed_failures = 0
+    if check_deployed:
+        deployed_failures = deployed_function_checks()
+        failures += deployed_failures
+    else:
+        print("\n--- deployed state ---")
+        print("  skip  not requested; re-run with --deployed to verify the LIVE database")
+
     print("\n" + "=" * 74)
     if failures:
         print(f"RESULT: {failures} problem(s) found")
         return 1
-    print("RESULT: all RPC contracts match; SQL structure is balanced")
+    if check_deployed:
+        print("RESULT: RPC contracts match; SQL structure balanced; LIVE database verified")
+    else:
+        print("RESULT: all RPC contracts match; SQL structure is balanced")
+        print("        (migration files only - pass --deployed to check the live database)")
     return 0
 
 

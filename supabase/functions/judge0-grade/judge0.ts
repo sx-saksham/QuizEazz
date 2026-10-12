@@ -374,17 +374,37 @@ export async function fetchProgramResult(
   }
 }
 
-/** Polls until Judge0 returns a real verdict or the deadline passes. */
+/**
+ * Polls until Judge0 returns a real verdict or the deadline passes.
+ *
+ * `opts.deadlineAt` is an optional absolute epoch-ms cutoff. It exists so a
+ * long sweep can stop one slow attempt instead of being killed by the Edge
+ * Function wall clock with half the cohort unexplained. It changes nothing
+ * when omitted: the caller then relies on attempts x delayMs exactly as
+ * before.
+ *
+ * Hitting either deadline is NOT a verdict. Both return status_id null, which
+ * every caller already treats as "leave this answer Pending Evaluation".
+ */
 export async function pollUntilVerdict(
   config: Judge0ClientConfig,
   submissionToken: string,
-  opts: { attempts: number; delayMs: number },
+  opts: { attempts: number; delayMs: number; deadlineAt?: number | null },
 ): Promise<Judge0ResultFields> {
+  const deadlineAt = opts.deadlineAt ?? null
   for (let i = 0; i < opts.attempts; i++) {
+    if (deadlineAt !== null && Date.now() >= deadlineAt) break
     const result = await fetchProgramResult(config, submissionToken)
     const statusId = result.status_id
     if (statusId !== null && !IN_FLIGHT.has(statusId)) return result
-    if (i < opts.attempts - 1) await new Promise((r) => setTimeout(r, opts.delayMs))
+    if (i < opts.attempts - 1) {
+      const wait =
+        deadlineAt === null
+          ? opts.delayMs
+          : Math.min(opts.delayMs, deadlineAt - Date.now())
+      if (wait <= 0) break
+      await new Promise((r) => setTimeout(r, wait))
+    }
   }
   // Deadline reached without a verdict. The caller must leave the answer
   // pending; it must never record a failure verdict.

@@ -41,6 +41,64 @@ import {
 const POLL_ATTEMPTS = 20
 const POLL_DELAY_MS = 1500
 
+/**
+ * ===================================================================
+ * SWEEP EXECUTION BUDGET (P2)
+ * ===================================================================
+ * Supabase Edge Functions have a ~150s wall-clock limit. A production
+ * load test with 75 students showed 21 sweep/invocation runs dying on it
+ * (14x546, 4x504, 3x503): 75 attempts x 5 hidden cases = 375 Judge0
+ * submissions at ~2.63 submissions/sec is ~143s of pure Judge0 time,
+ * before any poll latency.
+ *
+ * A fixed batch size cannot fix that on its own, because the unit of
+ * cost is SUBMISSIONS, not attempts: the publication gate requires only
+ * one validated hidden test case and imposes no upper bound on cases
+ * per question or coding questions per paper. 25 attempts could be 25
+ * submissions or 1500. Only a wall-clock deadline actually bounds it.
+ *
+ * So the sweep is bounded by TIME, with a concurrency cap so the
+ * deadline is actionable - an unbounded Promise.all starts every attempt
+ * before any deadline check could run.
+ *
+ * Stopping early is SAFE and is the designed recovery path: pending
+ * grading work is durable in PostgreSQL (answers.evaluation_status =
+ * 'Pending Evaluation'), so any attempt not started stays pending and
+ * the next scheduled sweep picks it up. Nothing is lost, nothing is
+ * marked wrong, and no student action is required.
+ *
+ * 110s leaves ~40s of margin below the 150s ceiling for the in-flight
+ * wave to finish and for the response to be returned.
+ * ===================================================================
+ */
+const SWEEP_BUDGET_MS = 110_000
+const SWEEP_CONCURRENCY = 10
+
+/**
+ * Hard cap on ONE attempt inside a sweep.
+ *
+ * Attempts in a wave run concurrently, so a wave's wall-clock length is the
+ * SLOWEST member of that wave, not the sum. Without a per-attempt cap, one
+ * attempt whose Judge0 cases each burn the full 30s poll budget
+ * (20 attempts x 1500ms) can hold its whole wave open for ~150s and get the
+ * entire invocation killed by the Edge wall clock, losing the 9 healthy
+ * attempts that were running alongside it.
+ *
+ * 90s is comfortably above a real attempt (5 cases, ~2.63 submissions/sec
+ * under load, ~40-48s observed for a whole 25-student cohort) while staying
+ * well inside the sweep budget. It is combined with the sweep deadline as
+ * min(now + this, sweepDeadline), so neither limit can be used to overrun
+ * the other.
+ *
+ * Reaching it is NOT a failure: the answer keeps 'Pending Evaluation' and the
+ * next sweep resumes it. Verdicts already applied stay applied, so a slow
+ * attempt still makes forward progress across sweeps rather than restarting.
+ *
+ * Omitted entirely for browser-triggered grading, which keeps its existing
+ * behaviour (the browser abandons at 45s and the sweep recovers the rest).
+ */
+const GRADING_ATTEMPT_BUDGET_MS = 90_000
+
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -122,6 +180,16 @@ function logGrading(fields: GradingLogFields): void {
 Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
 
+  // Declared OUTSIDE the try so the catch handler below can read it.
+  //
+  // `catch` is a sibling block of `try`, not a child, so a binding declared
+  // inside `try` is not in scope there. Reading it threw a ReferenceError from
+  // inside the error handler, which masked the real error and replaced the
+  // intended JSON 500 with an opaque platform failure. Defaulting to false is
+  // safe: before the key is compared the caller is not yet known to be service
+  // role, and the only use is choosing a log source label.
+  let isServiceRole = false
+
   // The token is never echoed, not even on an internal error.
   try {
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
@@ -135,7 +203,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (!bearer) return json({ error: 'missing authorization' }, 401)
 
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    const isServiceRole = !!serviceRoleKey && bearer === serviceRoleKey
+    isServiceRole = !!serviceRoleKey && bearer === serviceRoleKey
 
     // The CALLER's client. It carries the student's own JWT in the
     // Authorization header, so auth.uid() resolves inside SQL. It is used
@@ -240,17 +308,94 @@ Deno.serve(async (req: Request): Promise<Response> => {
           typeof row === 'string' ? row : row.attempt_id,
         )
         .filter((id): id is string => typeof id === 'string' && id.length > 0)
-      const results = await Promise.all(
-        ids.map((id) => gradeAttempt(cfg, admin, id, 'sweep')),
-      )
+      // Grade in bounded waves under a wall-clock deadline.
+      //
+      // The deadline is checked before EACH attempt is admitted to a
+      // wave, not once per batch: an attempt may only start while budget
+      // remains. When it is exhausted we stop claiming new work and
+      // return. Every attempt not started stays 'Pending Evaluation' in
+      // PostgreSQL and is recovered by the next scheduled sweep, so an
+      // early return is a normal, recoverable outcome - never a lost
+      // submission and never a fabricated verdict.
+      const results: Array<Record<string, unknown>> = []
+      let started = 0
+      let failed = 0
+      let budgetExhausted = false
+      const sweepDeadline = startedAt + SWEEP_BUDGET_MS
+
+      for (let i = 0; i < ids.length; i += SWEEP_CONCURRENCY) {
+        const wave: string[] = []
+        while (wave.length < SWEEP_CONCURRENCY && i + wave.length < ids.length) {
+          if (Date.now() >= sweepDeadline) {
+            budgetExhausted = true
+            break
+          }
+          wave.push(ids[i + wave.length])
+        }
+        if (wave.length === 0) {
+          budgetExhausted = true
+          break
+        }
+
+        started += wave.length
+
+        // Each attempt gets its OWN deadline, and never one later than the
+        // sweep deadline, so a slow attempt cannot outlive the budget that
+        // admitted it. Attempts inside a wave run concurrently.
+        const waveDeadline = Math.min(
+          Date.now() + GRADING_ATTEMPT_BUDGET_MS,
+          sweepDeadline,
+        )
+
+        // allSettled, not all: one attempt failing must never abandon the
+        // other nine in this wave or the remaining waves. A rejected attempt
+        // simply keeps its answers 'Pending Evaluation' for the next sweep.
+        const settled = await Promise.allSettled(
+          wave.map((id) => gradeAttempt(cfg, admin, id, 'sweep', waveDeadline)),
+        )
+        for (const s of settled) {
+          if (s.status === 'fulfilled') {
+            results.push(s.value)
+          } else {
+            failed += 1
+            logGrading({
+              event: 'grading_failed',
+              attemptId: 'sweep-wave',
+              source: 'sweep',
+              error: `attempt raised: ${
+                s.reason instanceof Error ? s.reason.message : 'unknown error'
+              }`,
+            })
+          }
+        }
+
+        if (budgetExhausted) break
+      }
+
+      const deferred = ids.length - started
       logGrading({
         event: 'grading_complete',
         attemptId: 'sweep',
         source: 'sweep',
-        graded: ids.length,
+        graded: started - failed,
         durationMs: Date.now() - startedAt,
+        ...(deferred > 0
+          ? {
+              error: `sweep budget reached; ${deferred} attempt(s) left pending for the next sweep`,
+            }
+          : {}),
       })
-      return json({ swept: ids.length, results })
+      // 'swept' keeps its existing meaning: how many candidates the server
+      // offered for recovery. Every other field is additive, so no existing
+      // consumer of this response changes shape or field type.
+      return json({
+        swept: ids.length,
+        graded: started - failed,
+        failed,
+        deferred,
+        budget_exhausted: budgetExhausted,
+        results,
+      })
     }
 
     const attemptId = payload.attempt_id
@@ -310,6 +455,7 @@ async function gradeAttempt(
   admin: ReturnType<typeof createClient>,
   attemptId: string,
   source: GradingSource = 'frontend',
+  deadlineAt: number | null = null,
 ): Promise<Record<string, unknown>> {
   const startedAt = Date.now()
   const { data: pending, error: pendingErr } = await admin.rpc(
@@ -357,8 +503,18 @@ async function gradeAttempt(
   })
 
   const graded: Array<Record<string, unknown>> = []
+  let deadlineHit = false
 
   for (const row of rows) {
+    // Budget spent. Stop claiming further answers for this attempt; every one
+    // not yet reached stays 'Pending Evaluation' and is picked up by the next
+    // sweep. Answers already graded keep the verdict they were given, so this
+    // is a pause, not a rollback.
+    if (deadlineAt !== null && Date.now() >= deadlineAt) {
+      deadlineHit = true
+      break
+    }
+
     // No code at all -> genuinely not attempted. This is a fact about the
     // submission, not a guess about correctness.
     if (!row.source_code || row.source_code.trim() === '') {
@@ -441,6 +597,7 @@ async function gradeAttempt(
     const caseRun = await runHiddenTests(cfg, {
       sourceCode: row.source_code,
       cases: usableCases,
+      deadlineAt,
     })
     if (!caseRun.ok) {
       // Transport failure or poll deadline. NOT a verdict: the answer stays
@@ -498,11 +655,18 @@ async function gradeAttempt(
   }
 
   // Recompute the attempt totals now that programming verdicts landed.
+  // Finalization runs even after a deadline break: it recomputes from the
+  // stored answer rows, so the attempt honestly reports whatever is still
+  // pending rather than staying frozen at a stale score.
   const { error: finalizeErr } = await admin.rpc('quizeazz_finalize_attempt_grading', {
     p_attempt_id: attemptId,
   })
 
-  const stillPending = graded.filter((g) => (g as { pending?: boolean }).pending).length
+  // Answers that were never reached (deadline break) are pending too, even
+  // though they were never pushed into `graded`.
+  const deferredAnswers = deadlineHit ? rows.length - graded.length : 0
+  const stillPending =
+    graded.filter((g) => (g as { pending?: boolean }).pending).length + deferredAnswers
   logGrading({
     event: finalizeErr ? 'grading_failed' : 'grading_complete',
     attemptId,
@@ -511,6 +675,9 @@ async function gradeAttempt(
     pending: stillPending,
     durationMs: Date.now() - startedAt,
     ...(finalizeErr ? { error: `finalize failed: ${finalizeErr.message}` } : {}),
+    ...(deadlineHit
+      ? { error: 'grading deadline reached; remaining answers stay pending' }
+      : {}),
   })
 
   return {
@@ -518,6 +685,7 @@ async function gradeAttempt(
     ok: true,
     graded: graded.length,
     results: graded,
+    deadline_exhausted: deadlineHit,
     finalize_error: finalizeErr ? finalizeErr.message : null,
   }
 }
@@ -554,8 +722,11 @@ interface CaseRunTransport {
 
 async function runHiddenTests(
   cfg: { baseUrl: string; token: string },
-  input: { sourceCode: string; cases: HiddenTestCase[] },
+  input: { sourceCode: string; cases: HiddenTestCase[]; deadlineAt?: number | null },
 ): Promise<CaseRunSuccess | CaseRunTransport> {
+  // Normalised once: `null` means "no deadline" (browser-triggered grading),
+  // which keeps this path's behaviour exactly as it was.
+  const deadlineAt = input.deadlineAt ?? null
   let passedCases = 0
   // Decisive run evidence. Initialized empty; always overwritten by the
   // first completed Judge0 run before any ok:true return below.
@@ -580,6 +751,13 @@ async function runHiddenTests(
   }
 
   for (const tc of input.cases) {
+    // A deadline here leaves the answer exactly as a transport failure would:
+    // still 'Pending Evaluation', retried by the next sweep. It is never a
+    // verdict, so a slow Judge0 can never be recorded as Wrong Answer.
+    if (deadlineAt !== null && Date.now() >= deadlineAt) {
+      return { ok: false, transportError: 'grading deadline reached' }
+    }
+
     const built = buildSubmissionBody({
       language: 'cpp',
       sourceCode: input.sourceCode,
@@ -612,6 +790,7 @@ async function runHiddenTests(
       result = await pollUntilVerdict(cfg, submissionToken, {
         attempts: POLL_ATTEMPTS,
         delayMs: POLL_DELAY_MS,
+        deadlineAt,
       })
     } catch (err) {
       return {
