@@ -35,8 +35,8 @@ TEMPLATE = {
 }
 TEACHER_UUID = "dde0c3e8-61ee-4d36-a874-3b1ef8a82413"
 STUDENT_UUID = "1a79277a-f727-4f55-adc3-107aa00045f5"
-TEACHER_MAIL = "zzsmoke-teacher-20261012@gmail.com"
-STUDENT_MAIL = "zzsmoke-student-20261012@gmail.com"
+TEACHER_MAIL = "zzsmoke-teacher-20261012@example.test"
+STUDENT_MAIL = "zzsmoke-student-20261012@example.test"
 
 
 def fresh():
