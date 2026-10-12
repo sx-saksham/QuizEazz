@@ -36,7 +36,7 @@ SAFETY
 """
 
 import os
-import random
+import secrets
 import re
 import sys
 import threading
@@ -120,26 +120,52 @@ INSERT INTO public.exam_questions VALUES
 VERSION_P = "UUID, UUID, TEXT, TEXT, INT, INT, INT, NUMERIC, TEXT, TEXT, TEXT, TEXT"
 
 
-def ensure_roles(psyc, dsn):
+def ensure_roles(psyc, dsn, created=None):
     """
     Create the Supabase roles this function's ACL refers to.
 
     A stock postgres:17 image has none of them, so has_function_privilege
     would fail. Roles are cluster-scoped and exist only inside this
     disposable container.
+
+    `created` is an optional set receiving the names of the roles THIS call
+    created. A role that already existed is never recorded, and a role not in
+    this set must never be dropped. The parameter is optional so the existing
+    two-argument caller in burst_75_harness.leg_b keeps working.
     """
     conn = psyc.connect(dsn, autocommit=True)
     try:
         with conn.cursor() as cur:
             for role in ("anon", "authenticated", "service_role"):
-                cur.execute(
-                    "DO $$ BEGIN "
-                    f"IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') "
-                    f"THEN CREATE ROLE {role} NOLOGIN; END IF; "
-                    "END $$;"
-                )
+                cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+                if cur.fetchone() is not None:
+                    continue          # pre-existing: not ours, never ours to drop
+                # role name comes from the literal tuple above, never from input
+                cur.execute(f"CREATE ROLE {role} NOLOGIN")
+                if created is not None:
+                    created.add(role)
     finally:
         conn.close()
+
+
+def drop_roles(psyc, dsn, created):
+    """
+    Drop ONLY roles this run created, and only once every disposable database
+    is gone. A role absent from `created` is never touched. A DROP that fails
+    (role still owns objects or holds grants) is reported and left in place -
+    nothing is forced.
+    """
+    for role in sorted(created):
+        try:
+            conn = psyc.connect(dsn, autocommit=True)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f'DROP ROLE IF EXISTS "{role}"')
+            finally:
+                conn.close()
+            print(f"    dropped role {role} (created by this run)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"    LEFT IN PLACE role {role}: {type(exc).__name__}")
 
 
 # Migration 07 established this ACL. Migration 20 adds no GRANT/REVOKE and
@@ -238,11 +264,19 @@ def race(conn_factory, answer_id, barrier):
 
 def run_variant(psyc, dsn, dbname, body_sql, label):
     """Install `body_sql` into a throwaway DB and run the concurrent workload."""
+    created_db = False
     admin = psyc.connect(dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
-            cur.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+            # Fail closed. This rehearsal must never destroy a database it did
+            # not create, so a name collision aborts instead of dropping.
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,))
+            if cur.fetchone() is not None:
+                raise RuntimeError(
+                    f"refusing to create over an existing database {dbname!r}: "
+                    "this rehearsal never drops a database it did not create")
             cur.execute(f'CREATE DATABASE "{dbname}"')
+            created_db = True
     finally:
         admin.close()
 
@@ -291,14 +325,16 @@ def run_variant(psyc, dsn, dbname, body_sql, label):
         # ---- inspect the INSTALLED function before dropping the database ---
         contract = inspect_contract(psyc, target)
     finally:
-        # Always drop the disposable database, even if setup or the race raised.
-        # A leaked database would otherwise silently accumulate on the host.
-        admin = psyc.connect(dsn, autocommit=True)
-        try:
-            with admin.cursor() as cur:
-                cur.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
-        finally:
-            admin.close()
+        # Drop the disposable database even if setup or the race raised, so a
+        # failure cannot leak one. Guarded on created_db: on a collision we
+        # raised BEFORE creating, and must not drop what we did not make.
+        if created_db:
+            admin = psyc.connect(dsn, autocommit=True)
+            try:
+                with admin.cursor() as cur:
+                    cur.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+            finally:
+                admin.close()
 
     return label, rounds, double_applies, contract
 
@@ -377,31 +413,43 @@ def main():
             f"for DSN {host}"
         )
 
-    tag = random.randint(100000, 999999)
+    # 64 bits from the OS CSPRNG, so this name cannot collide with
+    # anything; a collision now aborts the rehearsal rather than dropping.
+    tag = secrets.token_hex(8)
     print("=" * 74)
     print("QuizEazz  ·  verdict concurrency rehearsal (P1)")
     print("=" * 74)
     print(f"  target host : {host}  (disposable databases only)")
     print(f"  rounds      : {ROUNDS} per variant")
+    created_roles = set()
     try:
-        ensure_roles(psyc, dsn)
+        ensure_roles(psyc, dsn, created_roles)
     except Exception as exc:  # noqa: BLE001
         print(f"  ERROR  could not create the Supabase roles: {exc}")
+        drop_roles(psyc, dsn, created_roles)
         return 1
     print()
 
     results = []
-    for fname, label in (
-        ("migration_09_cpp_only_and_verdict_fix.sql", "migration 09  (NO row lock - current production)"),
-        ("migration_20_verdict_row_lock.sql", "migration 20  (FOR UPDATE - the fix)"),
-    ):
-        try:
-            results.append(
-                run_variant(psyc, dsn, f"quizeazz_rehearsal_{tag}_{fname[10:12]}", verdict_body(fname), label)
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ERROR  {label}: {type(exc).__name__}: {exc}")
-            return 1
+    try:
+        for fname, label in (
+            ("migration_09_cpp_only_and_verdict_fix.sql", "migration 09  (NO row lock - current production)"),
+            ("migration_20_verdict_row_lock.sql", "migration 20  (FOR UPDATE - the fix)"),
+        ):
+            try:
+                results.append(
+                    run_variant(psyc, dsn, f"quizeazz_rehearsal_{tag}_{fname[10:12]}", verdict_body(fname), label)
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ERROR  {label}: {type(exc).__name__}: {exc}")
+                return 1
+    finally:
+        # Every disposable database is gone (run_variant drops each in its own
+        # finally), so these roles have no dependents left. Only roles this run
+        # created are attempted; anything pre-existing is untouched.
+        if created_roles:
+            print("  cleaning up roles this run created:")
+            drop_roles(psyc, dsn, created_roles)
 
     failed = 0
     for label, rounds, double_applies, contract in results:
