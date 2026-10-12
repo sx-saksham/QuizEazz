@@ -88,29 +88,77 @@ cannot come from a test that is insensitive to the defect it claims to detect.
 
 ---
 
-## Open issue — unrelated to this race, still unresolved
+## Superseded claim — `v_marks_total`, corrected
 
-`supabase/migration_20_verdict_row_lock.sql` declares
+> **This section previously asserted a defect that the rehearsal disproved. The
+> earlier claim was wrong and is withdrawn.**
 
-```sql
-v_marks_total INT := 0;
-```
+An earlier revision of this record stated that
+`v_marks_total INT := 0` in `supabase/migration_20_verdict_row_lock.sql`
+made the `IF v_marks_total IS NULL THEN RAISE` guard unreachable, on the
+reasoning that PL/pgSQL leaves a `SELECT ... INTO` target unchanged when the
+query returns zero rows.
 
-and later guards with
+**That reasoning was incomplete, and a later disposable rehearsal contradicted
+it.** A second run against a disposable local PostgreSQL 17.11 cluster, using
+`scripts/test_verdict_marks_guard.py` (run label `marksguard-20261012T134827Z`,
+exit code 1), installed the current body verbatim and exercised three
+invalid-answer cases:
 
-```sql
-IF v_marks_total IS NULL THEN
-  RAISE EXCEPTION 'Answer % is not a coding answer of attempt %.', ...;
-```
+| Case | CURRENT body | Corrected variant |
+|---|---|---|
+| coding answer with no `exam_questions` row | **refused** | refused |
+| answer whose `question_type` is not `coding` | **refused** | refused |
+| answer belonging to a different attempt | **refused** | refused |
 
-Because the variable is **initialised to `0` rather than left `NULL`**, a marks
-lookup that matches no row leaves it at `0`, so the `IS NULL` guard can never
-fire. Grading then proceeds with a marks total of zero instead of refusing. The
-same initialisation is inherited from the earlier migration and is **not**
-introduced or fixed by migration 20.
+and three legitimate cases:
 
-This defect is orthogonal to the row-lock race proved above, is **not** covered
-by this rehearsal, and remains **unfixed**. It should be tracked separately.
+| Case | CURRENT body | Corrected variant |
+|---|---|---|
+| valid coding answer, `Correct`, marks 10 | accepted, 10 | accepted, 10 |
+| valid coding answer with `NULL` marks | accepted, 0 | accepted, 0 |
+| valid coding answer, `Wrong Answer` | accepted, 0 | accepted, 0 |
+
+**The current body refused every invalid case.** The negative control therefore
+failed as designed — the suite reports that it "cannot demonstrate the bug it
+was written to catch" and exits non-zero rather than reporting a pass.
+
+The observed behaviour is consistent with PL/pgSQL assigning `NULL` to a
+`SELECT ... INTO` target when the query matches no rows, so the `IS NULL` guard
+fires on a missing row. On that reading the `:= 0` initialiser is redundant
+rather than harmful.
+
+### What this establishes, and what it does not
+
+- It establishes that **in this rehearsal**, on this disposable cluster, with
+  this minimal stand-in schema, the guard fired.
+- It does **not** establish that the function is correct, in production, or in
+  general. It is a single local observation against a stand-in schema.
+- It does **not** validate the live deployed function or anything about the
+  linked Supabase project.
+- Whether any defect exists here at all is **not** established. The prior
+  static diagnosis is withdrawn, and no replacement claim is made.
+
+### Unresolved: trigger versus fixture seeding
+
+The same rehearsal surfaced a second question it could **not** answer. The
+stand-in anti-tamper trigger refuses an INSERT that supplies any of
+`is_correct`, `marks_awarded`, or `evaluation_status`. The fixtures insert
+answers with `evaluation_status = 'Pending Evaluation'`, which static reading
+predicts should therefore be rejected. It was not rejected, and the equivalent
+fixtures in the concurrency rehearsal were likewise accepted.
+
+**The cause is unknown and is not guessed at here.** It bears on fixture
+fidelity rather than on migration 20, and it should be resolved before either
+rehearsal is relied on for anything beyond the properties they actually
+measured.
+
+### Status
+
+No change is proposed to the SQL on the basis of the withdrawn claim. Whether
+the `:= 0` initialiser is worth removing as a defensive measure — so the guard
+cannot be defeated by a future change to the lookup — is a separate question
+that this rehearsal did not address.
 
 ---
 
