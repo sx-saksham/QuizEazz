@@ -1,0 +1,105 @@
+{
+  "_status": "CONSUMED_AND_CLEANED",
+  "_run_id": "2026-10-12-smoke2",
+  "_note": "HISTORICAL RECORD ONLY. Every UUID below was created and then deleted during the ZZSMOKE grading smoke test. None exist in production.",
+  "_emails": "REDACTED - personal addresses deliberately omitted from this repository.",
+  "_restoration_proof": "Content-hash audit: 10 of 11 baselined tables byte-identical; 1 row(s) differ in content and are recorded individually below. This is NOT a byte-identical restoration of the whole database.",
+  "_restoration_audit": {
+    "method": "per-table content-hash comparison of every row id present in both the committed baseline and live state (md5 over the full row)",
+    "scope_note": "This is a stronger proof than the baseline comparison, which keys on id presence and row count only and cannot observe an in-place change.",
+    "tables_audited": 11,
+    "tables_byte_identical": [
+      "auth.identities",
+      "public.answers",
+      "public.exam_assignments",
+      "public.exam_attempts",
+      "public.exam_questions",
+      "public.exams",
+      "public.profiles",
+      "public.programming_test_cases",
+      "public.questions",
+      "public.security_events"
+    ],
+    "tables_with_content_change": [
+      "auth.users"
+    ],
+    "all_tables_byte_identical": false,
+    "total_content_changed_rows": 1,
+    "known_content_differences": [
+      {
+        "table": "auth.users",
+        "id": "a5cc4116-8cc9-4d4e-8b71-fe0a64944f98",
+        "kind": "content-hash differs from baseline",
+        "status": "unresolved",
+        "note": "This is an original production account, not a fixture account. Its updated_at moved to 2026-10-12T01:36:03Z during the test window while last_sign_in_at stayed at 2026-10-08T19:27:02Z. The fixture exercised only its own two accounts, and the cleanup script never deletes or modifies auth.users, so this difference was neither caused by the fixture nor repairable by cleanup. It remains open and is recorded here so it is not mistaken for a restoration defect introduced by this run.",
+        "do_not_modify": true
+      }
+    ]
+  },
+  "_evidence_categories": {
+    "_about": "Categories are kept distinct on purpose. Missing evidence is never promoted into a successful check.",
+    "verified_facts": [
+      "presence and row counts match deploy/ZZSMOKE_BASELINE.json for all 11 baselined tables",
+      "content-hash audit: 10 table(s) byte-identical, 1 row(s) changed",
+      "Disposable ZZSMOKE grading smoke test. One hidden-test programming question was authored through the teacher RPC path, confined to a single fixture student, taken through the real browser UI, and graded by Judge0 CE 1.13.1, then removed. After cleanup, the nine public-schema tables and auth.identities match their recorded baseline content hashes exactly.",
+      "The two fixture Auth identities are absent from auth.users and auth.identities (verified by end-state inspection, not by observing the Dashboard action)."
+    ],
+    "known_discrepancies": [
+      {
+        "table": "auth.users",
+        "id": "a5cc4116-8cc9-4d4e-8b71-fe0a64944f98",
+        "kind": "content-hash differs from baseline",
+        "status": "unresolved",
+        "note": "This is an original production account, not a fixture account. Its updated_at moved to 2026-10-12T01:36:03Z during the test window while last_sign_in_at stayed at 2026-10-08T19:27:02Z. The fixture exercised only its own two accounts, and the cleanup script never deletes or modifies auth.users, so this difference was neither caused by the fixture nor repairable by cleanup. It remains open and is recorded here so it is not mistaken for a restoration defect introduced by this run.",
+        "do_not_modify": true
+      }
+    ],
+    "unavailable_evidence": [
+      "Cleanup execution output (NOTICE lines) - never captured; not synthesised.",
+      "Per-test-case grading results - not persisted by the grading path.",
+      "The browser Network capture of the student submission - the observed tab never left the fullscreen gate, so the submission request was not captured.",
+      "Edge Function source:'frontend' log line - no Dashboard session was available and the CLI offers no equivalent."
+    ],
+    "inferences": [
+      "Trigger path = frontend. Inferred by exclusion: the live cron sweep eligibility gate could not have selected the attempt before grading completed. This is an inference, NOT an observed log line, and a short latency alone would not establish it."
+    ]
+  },
+  "_grading": {
+    "outcome": "evaluated",
+    "verdict": "Correct",
+    "score": "1.00",
+    "max_score": "1.00",
+    "submission_to_verdict_seconds": 6.46,
+    "engine": "Judge0 CE 1.13.1",
+    "judge0_status_id": 3,
+    "exit_code": 0,
+    "hidden_tests_aggregate": "2/2",
+    "hidden_tests_are_all_hidden": true,
+    "recorded_final_stdout": "2000000000",
+    "per_test_case_results_persisted": false,
+    "_per_test_case_note": "Per-test-case outcomes were not persisted; only aggregate results and the recorded final stdout are available.",
+    "_attribution": {
+      "trigger_path": "frontend",
+      "method": "exclusion",
+      "browser_request_captured": false,
+      "edge_source_frontend_log_available": false,
+      "basis": "The live database definition of the sweep eligibility function requires submitted_at to be at least 60 seconds old, and the active cron job fires every two minutes, so no sweep tick could have selected this attempt before grading had already finished. This is an exclusion argument built from the live gate and schedule. It is not an observed log line, and the short latency on its own would not establish it."
+    },
+    "_attribution_note": "The grading outcome is a verified fact. The TRIGGER PATH is an inference derived by exclusion, not an observation."
+  },
+  "_cleanup_execution": {
+    "output_captured": false,
+    "_note": "NOT AVAILABLE - the cleanup was executed outside this tooling and its output was never captured. No NOTICE output is recorded, because none was observed. Absence of evidence is not evidence of success.",
+    "verified_by": "post-transaction end-state inspection only"
+  },
+  "_auth_fixture_deletion": {
+    "observed_directly": false,
+    "verified_by": "post-cleanup end-state inspection: both fixture account UUIDs were confirmed absent from auth.users and auth.identities by read-only query after the operator performed the deletion in the Supabase Dashboard. This tooling did not perform the deletion and did not witness the Dashboard action.",
+    "_note": "Performed by the operator through the Supabase Dashboard. This tooling did not execute the deletion and did not observe the Dashboard action first-hand; only the resulting end state was verified."
+  },
+  "teacher_id": "4f9d602d-954d-495a-b0ab-659abd8dc24b",
+  "student_id": "8c96455e-c343-49ec-b853-2435b8167309",
+  "exam_id": "b92b326a-67af-455e-99ab-37566e58b6c0",
+  "question_id": "0eae6958-292d-4bd8-8db2-a7f32e13c42e",
+  "attempt_id": "db6c790e-8d6d-4637-a163-ffb46c8a22e2"
+}

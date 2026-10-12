@@ -1,0 +1,9 @@
+{
+  "_status": "TEMPLATE - no active fixture. Populated by scripts/zzsmoke_capture_manifest.py at fixture creation.",
+  "_rule": "A null id means 'not yet created'. Tooling refuses to classify or delete against it; ZZSMOKE_CLEANUP.sql reads operator-pasted literals, never this file.",
+  "teacher_id": null,
+  "student_id": null,
+  "exam_id": null,
+  "question_id": null,
+  "attempt_id": null
+}
