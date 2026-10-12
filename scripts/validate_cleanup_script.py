@@ -266,7 +266,13 @@ def main():
                     and after["public.exams"] == before["public.exams"] - 1
                     and after["public.questions"] == before["public.questions"] - 1
                     and after["public.profiles"] == before["public.profiles"] - 2
-                    and after["auth.users"] == before["auth.users"] - 2
+                    # ZZSMOKE_CLEANUP.sql deliberately stops at public.profiles and
+                    # never touches auth.users / auth.identities (see its header).
+                    # auth.users is the PARENT of profiles in an ON DELETE CASCADE
+                    # relationship, so removing profile rows cannot remove it.
+                    # The auth identities are deleted later, by a separate
+                    # Auth Admin API step. Expect NO change here.
+                    and after["auth.users"] == before["auth.users"]
                     and after["public.programming_test_cases"] == 0
                     and after["public.exam_questions"] == before["public.exam_questions"] - 1
                     and after["public.exam_assignments"] == 0
