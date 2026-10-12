@@ -37,3 +37,7 @@ Temp/
 #tmp
 .vercel
 .env*
+
+# Python bytecode (generated; never source)
+__pycache__/
+*.pyc
