@@ -1124,12 +1124,12 @@ export const ExamTakingScreen: React.FC = () => {
             {/* CODING — no Run, Compile, Test or per-question submit */}
             {currentQuestion.question_type === 'coding' && (
               <div className="space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-2 text-sm font-bold text-slate-800">
                     <Code2 className="h-4 w-4 text-indigo-600" />
                     <span>Programming Solution</span>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs text-slate-500 font-medium">Language:</span>
                     <span
                       aria-label="Programming language"
@@ -1137,6 +1137,25 @@ export const ExamTakingScreen: React.FC = () => {
                     >
                       C++
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isPaused || submittingRef.current) return
+                        const starterCode = currentQuestion.starter_code ?? ''
+                        const currentCode = answers[currentQuestion.id] !== undefined
+                          ? answers[currentQuestion.id]
+                          : starterCode
+                        if (currentCode !== starterCode) {
+                          if (!window.confirm('Restore the original starter code? Your current changes will be lost.')) return
+                        }
+                        setAnswers((prev) => ({ ...prev, [currentQuestion.id]: starterCode }))
+                        scheduleSave(currentQuestion.id, starterCode)
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 hover:text-slate-900 shadow-2xs transition-colors cursor-pointer"
+                      title="Restore original starter code"
+                    >
+                      <span>↻ Restore</span>
+                    </button>
                   </div>
                 </div>
 
@@ -1144,7 +1163,7 @@ export const ExamTakingScreen: React.FC = () => {
                   <Editor
                     height="380px"
                     language="cpp"
-                    value={currentAnswer || currentQuestion.starter_code || ''}
+                    value={answers[currentQuestion.id] !== undefined ? answers[currentQuestion.id] : (currentQuestion.starter_code ?? '')}
                     onChange={handleCodeChange}
                     theme="vs-dark"
                     options={{
